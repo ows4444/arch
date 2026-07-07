@@ -28,16 +28,26 @@ const OUTPUT_PREFIX = args.values.output;
 const MAX_CHARS = Number(args.values['max-chars']);
 const INCLUDE_EXTENSIONS = new Set([
   '.ts',
-  // '.mjs',
+  '.mjs', //
   '.json',
+  '.yaml',
+  '.yml',
+  '.sql',
+  '.conf',
 ]);
 
 const INCLUDE_FILENAMES = new Set([
-  // "Dockerfile",
-  // "Makefile",
+  '.nvmrc',
+  '.env.example',
+  '.dockerignore',
+  '.env.development',
+
+  'Dockerfile',
+  'Makefile',
+  '.gitkeep',
+  '.prettierrc',
+  '.prettierignore',
   // '.npmrc',
-  // '.gitkeep',
-  // '.prettierrc',
   // '.npmignore',
   // '.gitignore',
   // '.editorconfig',
@@ -121,7 +131,7 @@ function shouldIgnore(relPath: string): boolean {
 function shouldInclude(fileName: string): boolean {
   return (
     INCLUDE_EXTENSIONS.has(path.extname(fileName)) ||
-    INCLUDE_FILENAMES.has(fileName as never)
+    INCLUDE_FILENAMES.has(fileName)
   );
 }
 

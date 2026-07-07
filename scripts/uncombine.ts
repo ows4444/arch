@@ -30,10 +30,10 @@ for (const file of inputFiles) {
   BLOCK_REGEX.lastIndex = 0;
 
   while ((match = BLOCK_REGEX.exec(md)) !== null) {
-    const relativePath = match[1].trim();
-    const body = match[2].trim();
+    const relativePath = match[1]?.trim();
+    const body = match[2]?.trim();
 
-    if (!body) continue;
+    if (!relativePath || !body) continue;
 
     const fullPath = path.join(ROOT_DIR, relativePath);
 
