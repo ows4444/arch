@@ -7,13 +7,13 @@
     "webpack": true
   },
   "projects": {
-    "cashe": {
+    "cache": {
       "type": "library",
-      "root": "libs/cashe",
+      "root": "libs/cache",
       "entryFile": "index",
-      "sourceRoot": "libs/cashe/src",
+      "sourceRoot": "libs/cache/src",
       "compilerOptions": {
-        "tsConfigPath": "libs/cashe/tsconfig.lib.json"
+        "tsConfigPath": "libs/cache/tsconfig.lib.json"
       }
     },
     "database": {
