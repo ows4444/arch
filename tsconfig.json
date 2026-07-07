@@ -20,6 +20,26 @@
     "forceConsistentCasingInFileNames": true,
     "noImplicitAny": false,
     "strictBindCallApply": false,
-    "noFallthroughCasesInSwitch": false
+    "noFallthroughCasesInSwitch": false,
+    "paths": {
+      "@/cashe": [
+        "libs/cashe/src"
+      ],
+      "@/cashe/*": [
+        "libs/cashe/src/*"
+      ],
+      "@/database": [
+        "libs/database/src"
+      ],
+      "@/database/*": [
+        "libs/database/src/*"
+      ],
+      "@/queue": [
+        "libs/queue/src"
+      ],
+      "@/queue/*": [
+        "libs/queue/src/*"
+      ]
+    }
   }
 }
