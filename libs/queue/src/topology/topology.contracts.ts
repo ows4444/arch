@@ -19,6 +19,12 @@ function validateRetryStrategy(strategy: number[]): void {
   for (let index = 0; index < strategy.length; index += 1) {
     const delay = strategy[index];
 
+    if (typeof delay !== 'number') {
+      throw new QueueConfigurationError(
+        `Retry strategy must be an array of numbers. Received: ${typeof delay}`,
+      );
+    }
+
     if (delay > MAX_RETRY_DELAY_SECONDS) {
       throw new QueueConfigurationError(
         `Retry delay cannot exceed ${MAX_RETRY_DELAY_SECONDS} seconds. Received: ${delay}`,

@@ -9,9 +9,9 @@ export interface CacheEntry<V> {
 
   accessCount: number;
 
-  expiresAt?: number;
+  expiresAt?: number | undefined;
 
-  size?: number;
+  size?: number | undefined;
 
-  metadata?: Record<string, unknown>;
+  metadata?: Record<string, unknown> | undefined;
 }

@@ -275,7 +275,7 @@ export class MemoryCache<K, V> implements StatisticsAwareCache<K, V> {
   }
 
   async statistics(): Promise<Readonly<CacheStatistics>> {
-    return { ...this.stats };
+    return Promise.resolve(Object.freeze({ ...this.stats }));
   }
 
   async resetStatistics(): Promise<void> {

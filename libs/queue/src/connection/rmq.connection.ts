@@ -31,7 +31,7 @@ export class RMQConnection implements OnApplicationShutdown {
 
   private readonly resolvedConnectionName: string;
 
-  private rawConnectionPromise?: Promise<ChannelModel>;
+  private rawConnectionPromise: Promise<ChannelModel> | undefined;
 
   constructor(
     @Inject(RMQ_MODULE_OPTIONS)
@@ -69,11 +69,16 @@ export class RMQConnection implements OnApplicationShutdown {
     name: string,
     setup?: (channel: Channel) => Promise<void>,
   ): ChannelWrapper {
-    const channel = this.connection.createChannel({
+    const channelOpts: Parameters<AmqpConnectionManager['createChannel']>[0] = {
       name,
       confirm: true,
-      setup,
-    });
+    };
+
+    if (setup) {
+      channelOpts.setup = setup;
+    }
+
+    const channel = this.connection.createChannel(channelOpts);
 
     channel.on('error', (error) => {
       this.logger.error({

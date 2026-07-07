@@ -19,7 +19,7 @@ export class RMQContextFactory {
 
     const headers = RMQHeaderParser.parse(rawHeaders);
 
-    return {
+    const result: RMQContext = {
       messageId:
         typeof message.properties.messageId === 'string'
           ? message.properties.messageId
@@ -34,5 +34,6 @@ export class RMQContextFactory {
       receivedAt: Date.now(),
       signal: params.signal,
     };
+    return result;
   }
 }

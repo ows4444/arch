@@ -54,13 +54,13 @@ export interface RmqConsumerOptions<TPayload = unknown> {
 }
 
 export interface RMQContext {
-  messageId?: string;
+  messageId?: string | undefined;
 
   requestId: string;
 
-  correlationId?: string;
+  correlationId?: string | undefined;
 
-  causationId?: string;
+  causationId?: string | undefined;
 
   routingKey: string;
 

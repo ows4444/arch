@@ -2,5 +2,6 @@ import { EntitySchema, MixedList } from 'typeorm';
 
 export interface DatabaseBootstrapOptions {
   readonly entities:
-    MixedList<string | Function | EntitySchema<any>> | undefined;
+    | MixedList<string | ((...args: any[]) => any) | EntitySchema<any>>
+    | undefined;
 }

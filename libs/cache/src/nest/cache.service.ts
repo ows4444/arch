@@ -14,7 +14,7 @@ export class CacheService<K, V> {
   }
 
   set(key: K, value: V, ttl?: number): Promise<void> {
-    return this.cache.set(key, value, { ttl });
+    return this.cache.set(key, value, ttl !== undefined ? { ttl } : {});
   }
 
   delete(key: K): Promise<boolean> {

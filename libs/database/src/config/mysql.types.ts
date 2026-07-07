@@ -1,4 +1,4 @@
-import { MysqlConnectionOptions } from 'typeorm/driver/mysql/MysqlConnectionOptions.js';
+import { MysqlConnectionOptions } from 'typeorm/driver/mysql/MysqlConnectionOptions';
 
 export const MYSQL_ENV = 'MYSQL_ENV';
 

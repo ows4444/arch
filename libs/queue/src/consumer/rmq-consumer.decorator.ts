@@ -22,7 +22,7 @@ export const RMQConsumer = (
     exchange: queue.EXCHANGE_NAME,
     queue: queue.QUEUE_NAME,
     routingKey: queue.ROUTING_KEY,
-    payloadType: options.payload,
-    prefetch: options.prefetch,
-    retryPolicy: queue.RETRY_POLICY,
+    ...(options.payload && { payloadType: options.payload }),
+    ...(options.prefetch !== undefined && { prefetch: options.prefetch }),
+    ...(queue.RETRY_POLICY && { retryPolicy: queue.RETRY_POLICY }),
   } satisfies RmqConsumerOptions);

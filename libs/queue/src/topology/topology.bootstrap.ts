@@ -9,7 +9,7 @@ import { RetryTopologyBuilder } from '../retry/retry-topology.builder';
 export class TopologyBootstrap implements OnModuleInit {
   private readonly logger = new Logger(TopologyBootstrap.name);
 
-  private bootstrapPromise?: Promise<void>;
+  private bootstrapPromise: Promise<void> | undefined;
 
   constructor(
     private readonly connection: RMQConnection,

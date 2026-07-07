@@ -26,7 +26,7 @@ import { DataSourceFactory } from './datasource.factory';
 
 @Injectable()
 export class DataSourceManager implements OnApplicationShutdown {
-  private initializePromise?: Promise<void>;
+  private initializePromise: Promise<void> | undefined;
 
   private readonly logger = new Logger(DataSourceManager.name);
 
@@ -281,6 +281,9 @@ export class DataSourceManager implements OnApplicationShutdown {
     for (let i = 0; i < this.readers.length; i++) {
       const index = (this.nextReaderIndex + i) % this.readers.length;
       const candidate = this.readers[index];
+      if (!candidate) {
+        continue;
+      }
 
       if (candidate.healthy && candidate.status === DataSourceStatus.READY) {
         this.nextReaderIndex = (index + 1) % this.readers.length;

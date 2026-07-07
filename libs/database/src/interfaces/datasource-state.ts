@@ -20,37 +20,37 @@ export enum DataSourceStatus {
 export interface DataSourceMetrics {
   reconnectCount: number;
 
-  lastReconnectAttemptAt?: Date;
+  lastReconnectAttemptAt: Date | undefined;
 
   consecutiveHealthCheckFailures: number;
 
   healthCheckFailures: number;
 
-  latencyMs?: number;
+  latencyMs: number | undefined;
 
   successfulConnections: number;
 
   failedConnections: number;
 
-  lastConnectedAt?: Date;
+  lastConnectedAt: Date | undefined;
 
-  lastDisconnectedAt?: Date;
+  lastDisconnectedAt: Date | undefined;
 
-  lastHealthCheckAt?: Date;
+  lastHealthCheckAt: Date | undefined;
 
-  lastFailureAt?: Date;
+  lastFailureAt: Date | undefined;
 
-  lastError?: Error;
+  lastError: Error | undefined;
 
-  serverUuid?: string;
+  serverUuid: string | undefined;
 
-  hostname?: string;
+  hostname: string | undefined;
 
-  readOnly?: boolean;
+  readOnly: boolean | undefined;
 
-  lastServerChangeAt?: Date;
+  lastServerChangeAt: Date | undefined;
 
-  lastRoleChangeAt?: Date;
+  lastRoleChangeAt: Date | undefined;
 }
 
 export interface DataSourceState {
@@ -60,13 +60,13 @@ export interface DataSourceState {
 
   readonly configuration: DatabaseConnectionOptions;
 
-  dataSource?: DataSource;
+  dataSource: DataSource | undefined;
 
   status: DataSourceStatus;
 
   healthy: boolean;
 
-  reconnectPromise?: Promise<void>;
+  reconnectPromise: Promise<void> | undefined;
 
   metrics: DataSourceMetrics;
 }

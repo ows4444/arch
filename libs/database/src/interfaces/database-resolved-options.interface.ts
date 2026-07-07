@@ -6,7 +6,7 @@ import { DatabaseRetryOptions } from './database-retry-options.interface';
 export interface ResolvedDatabaseOptions {
   readonly writer: DatabaseConnectionOptions;
 
-  readonly readers?: readonly DatabaseConnectionOptions[];
+  readonly readers: readonly DatabaseConnectionOptions[] | undefined;
 
   readonly retry?: DatabaseRetryOptions;
 

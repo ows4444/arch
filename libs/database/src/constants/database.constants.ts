@@ -1,5 +1,4 @@
-import type { MysqlConnectionOptions } from 'typeorm/driver/mysql/MysqlConnectionOptions';
-import type { PostgresConnectionOptions } from 'typeorm/driver/postgres/PostgresConnectionOptions';
+import { MysqlConnectionOptions } from 'typeorm/driver/mysql/MysqlConnectionOptions';
 
 export const DEFAULT_HEALTH_CHECK_QUERY =
   'SELECT @@server_uuid, @@hostname, @@read_only';
@@ -21,12 +20,8 @@ export const DEFAULT_RETRY_OPTIONS = {
   reconnectCooldownMs: 60_000,
 } as const;
 
-export const DEFAULT_MYSQL_OPTIONS: Partial<
-  MysqlConnectionOptions | PostgresConnectionOptions
-> = {
+export const DEFAULT_MYSQL_OPTIONS: Partial<MysqlConnectionOptions> = {
   type: 'mysql',
-  synchronize: false,
-
   logging: false,
 
   migrationsRun: false,

@@ -78,7 +78,9 @@ export class DefaultCacheManager implements CacheManager {
     value: T,
     ttl?: number,
   ): Promise<void> {
-    await this.registry.get<T>(cache).set(key, value, { ttl });
+    await this.registry
+      .get<T>(cache)
+      .set(key, value, ttl !== undefined ? { ttl } : {});
   }
 
   async delete(cache: string, key: string): Promise<void> {

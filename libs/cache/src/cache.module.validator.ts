@@ -78,6 +78,10 @@ export class CacheModuleValidator {
 
     const config = options.caches[name];
 
+    if (!config) {
+      throw new Error(`Cache '${name}' is not configured.`);
+    }
+
     if (config.type === 'multi-level') {
       this.visit(config.options.l1, options, visited, active);
       this.visit(config.options.l2, options, visited, active);

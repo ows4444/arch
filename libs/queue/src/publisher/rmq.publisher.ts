@@ -46,8 +46,12 @@ export class RMQPublisher {
   ): Promise<void> {
     RMQHeaderValidator.validate({
       requestId: params.requestId,
-      correlationId: params.correlationId,
-      causationId: params.causationId,
+      ...(params.causationId && {
+        [RMQ_HEADERS.CAUSATION_ID]: params.causationId,
+      }),
+      ...(params.correlationId && {
+        [RMQ_HEADERS.CORRELATION_ID]: params.correlationId,
+      }),
     });
 
     const validatedPayload = params.payloadType
@@ -58,9 +62,6 @@ export class RMQPublisher {
 
     const publishOptions: Options.Publish = params.options ?? {};
 
-    // Extract caller-supplied headers, guarding against non-plain-object values
-    // (e.g. an accidental array). Arrays satisfy typeof === 'object' but spread
-    // as indexed keys {0: v, 1: v} which would corrupt the header map.
     const extraHeaders =
       publishOptions.headers !== null &&
       typeof publishOptions.headers === 'object' &&
@@ -78,10 +79,6 @@ export class RMQPublisher {
       contentType: 'application/json',
       messageId,
 
-      // Tracing headers are written last so they always take precedence over
-      // any same-key value in extraHeaders. correlationId and causationId are
-      // omitted entirely when undefined — an absent header is semantically
-      // distinct from an empty-string header at the consumer side.
       headers: {
         ...extraHeaders,
         [RMQ_HEADERS.REQUEST_ID]: params.requestId,

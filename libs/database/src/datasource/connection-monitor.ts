@@ -28,7 +28,7 @@ export class ConnectionMonitor
 {
   private readonly logger = new Logger(ConnectionMonitor.name);
 
-  private timer?: NodeJS.Timeout;
+  private timer: NodeJS.Timeout | undefined;
 
   private running = false;
 
@@ -159,6 +159,7 @@ export class ConnectionMonitor
       });
     } catch (error) {
       this.logger.warn(
+        // eslint-disable-next-line @typescript-eslint/restrict-template-expressions
         `Datasource '${state.name}' health check failed: ${error instanceof Error ? error.stack : error}`,
       );
 

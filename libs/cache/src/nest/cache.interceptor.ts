@@ -94,7 +94,7 @@ export class CacheInterceptor implements NestInterceptor {
             key,
             () => firstValueFrom(execute()),
             {
-              ttl: metadata.ttl,
+              ...(metadata.ttl !== undefined && { ttl: metadata.ttl }),
 
               cache: (value) =>
                 value !== undefined &&

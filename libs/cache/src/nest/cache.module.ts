@@ -24,7 +24,7 @@ export class CacheModule {
 
       const config = options.caches[name];
 
-      switch (config.type) {
+      switch (config?.type) {
         case 'memory':
           registry.register(
             name,
@@ -114,7 +114,7 @@ export class CacheModule {
   static forRootAsync(options: CacheModuleAsyncOptions): DynamicModule {
     return {
       module: CacheModule,
-      imports: options.imports,
+      imports: options.imports ?? [],
       providers: [
         {
           provide: CACHE_OPTIONS,
