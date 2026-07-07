@@ -1,0 +1,123 @@
+import type { RmqTopologyDefinition } from '../queue.types';
+import { assertEntityName, QueueContractOptions } from './topology.contracts';
+
+export type QueueDefinition = QueueContractOptions;
+
+export interface CompiledQueueDefinition {
+  EXCHANGE_NAME: string;
+
+  QUEUE_NAME: string;
+
+  ROUTING_KEY: string;
+
+  DURABLE: boolean;
+
+  ARGUMENTS?: Record<string, unknown>;
+
+  DEAD_LETTER_QUEUE?: {
+    QUEUE_NAME: string;
+
+    ROUTING_KEY: string;
+  };
+
+  RETRY_POLICY?: {
+    strategy: number[];
+  };
+}
+
+export interface CompiledTopology<
+  TExchange extends string,
+  TQueues extends Record<string, CompiledQueueDefinition>,
+> extends RmqTopologyDefinition {
+  EXCHANGE_NAME: TExchange;
+
+  TYPE: 'direct' | 'topic' | 'fanout' | 'headers';
+
+  DURABLE: boolean;
+
+  QUEUES: TQueues;
+}
+
+export function defineTopology<
+  TExchange extends string,
+  TQueues extends Record<string, QueueDefinition>,
+>(definition: {
+  exchange: TExchange;
+
+  type?: 'direct' | 'topic' | 'fanout' | 'headers';
+
+  durable?: boolean;
+
+  queues: TQueues;
+}): CompiledTopology<
+  TExchange,
+  {
+    [K in keyof TQueues]: CompiledQueueDefinition;
+  }
+> {
+  const queues = {} as {
+    [K in keyof TQueues]: CompiledQueueDefinition;
+  };
+
+  assertEntityName(definition.exchange, 'Exchange');
+
+  for (const key in definition.queues) {
+    const queue = definition.queues[key];
+
+    assertEntityName(queue.routingKey, `Routing key (${key})`);
+
+    assertEntityName(
+      queue.queueName ?? queue.routingKey,
+      `Queue name (${key})`,
+    );
+
+    queues[key] = {
+      EXCHANGE_NAME: definition.exchange,
+
+      QUEUE_NAME: queue.queueName ?? queue.routingKey,
+
+      ROUTING_KEY: queue.routingKey,
+
+      DURABLE: queue.durable ?? true,
+
+      ARGUMENTS: queue.arguments ?? {},
+
+      DEAD_LETTER_QUEUE: queue.dlq
+        ? {
+            QUEUE_NAME: `${queue.queueName ?? queue.routingKey}.dlq`,
+            ROUTING_KEY: `${queue.routingKey}.dlq`,
+          }
+        : undefined,
+
+      RETRY_POLICY: queue.retry
+        ? {
+            strategy: queue.retry.strategy,
+          }
+        : undefined,
+    };
+  }
+
+  return Object.freeze({
+    EXCHANGE_NAME: definition.exchange,
+    TYPE: definition.type ?? 'topic',
+    DURABLE: definition.durable ?? true,
+    exchange: definition.exchange,
+    type: definition.type ?? 'topic',
+    durable: definition.durable ?? true,
+    queues: Object.values(queues).map((queue) => ({
+      queue: queue.QUEUE_NAME,
+      routingKey: queue.ROUTING_KEY,
+      durable: queue.DURABLE,
+      arguments: queue.ARGUMENTS,
+      retryPolicy: queue.RETRY_POLICY,
+      deadLetterQueue: queue.DEAD_LETTER_QUEUE
+        ? {
+            queue: queue.DEAD_LETTER_QUEUE.QUEUE_NAME,
+            routingKey: queue.DEAD_LETTER_QUEUE.ROUTING_KEY,
+          }
+        : undefined,
+    })),
+
+    QUEUES: queues,
+  });
+}
