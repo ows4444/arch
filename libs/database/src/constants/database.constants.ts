@@ -18,6 +18,7 @@ export const DEFAULT_RETRY_OPTIONS = {
   initialDelayMs: 1_000,
   maxDelayMs: 30_000,
   reconnectCooldownMs: 60_000,
+  readRecoveryTimeoutMs: 2_000,
 } as const;
 
 export const DEFAULT_MYSQL_OPTIONS: Partial<MysqlConnectionOptions> = {

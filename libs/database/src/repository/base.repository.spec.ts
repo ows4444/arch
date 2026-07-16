@@ -3,6 +3,7 @@ import { BaseRepository } from './base.repository';
 import { RepositoryResolver } from './repository-resolver';
 import { DatabaseRole } from '../constants/database-role.enum';
 import { transactionContext } from '../transaction/transaction.context';
+import type { DataSourceState } from '../interfaces/datasource-state';
 
 interface TestEntity extends ObjectLiteral {
   id: number;
@@ -106,6 +107,7 @@ describe('BaseRepository retry-on-connectivity-error', () => {
     };
     const resolver = {
       resolve: jest.fn().mockReturnValue(repositoryStub),
+      peekReadState: jest.fn().mockReturnValue(undefined),
       reportFailure: jest.fn(),
       waitForRecovery: jest.fn().mockResolvedValue(true),
     } as unknown as RepositoryResolver;
@@ -115,6 +117,55 @@ describe('BaseRepository retry-on-connectivity-error', () => {
     await expect(repository.find({})).resolves.toEqual(['recovered']);
     expect(resolver.waitForRecovery).toHaveBeenCalledTimes(1);
     expect(repositoryStub.find).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports failure and awaits recovery against the exact reader state pinned for this attempt, not one re-selected afterward', async () => {
+    const readerA = { name: 'reader-a' } as unknown as DataSourceState;
+    const readerB = { name: 'reader-b' } as unknown as DataSourceState;
+    const repositoryStub = {
+      find: jest
+        .fn()
+        .mockRejectedValueOnce(connectivityError())
+        .mockResolvedValueOnce(['recovered']),
+    };
+    // Simulates round-robin having moved on to a different reader by the
+    // time recovery is attempted — the pin must still target readerA.
+    const peekReadState = jest
+      .fn()
+      .mockReturnValueOnce(readerA)
+      .mockReturnValueOnce(readerB);
+    const resolver = {
+      resolve: jest.fn().mockReturnValue(repositoryStub),
+      peekReadState,
+      withPinnedState: jest.fn((_state, fn: () => unknown) => fn()),
+      reportFailure: jest.fn(),
+      waitForRecovery: jest.fn().mockResolvedValue(true),
+    } as unknown as RepositoryResolver;
+
+    const repository = new TestRepository(DatabaseRole.READ, resolver);
+
+    await expect(repository.find({})).resolves.toEqual(['recovered']);
+
+    expect(resolver.reportFailure).toHaveBeenCalledWith(
+      DatabaseRole.READ,
+      expect.any(Error),
+      readerA,
+    );
+    expect(resolver.waitForRecovery).toHaveBeenCalledWith(
+      DatabaseRole.READ,
+      undefined,
+      readerA,
+    );
+    expect(resolver.withPinnedState).toHaveBeenNthCalledWith(
+      1,
+      readerA,
+      expect.any(Function),
+    );
+    expect(resolver.withPinnedState).toHaveBeenNthCalledWith(
+      2,
+      readerB,
+      expect.any(Function),
+    );
   });
 
   it('does not retry when an explicit manager was supplied, since the same stale manager would just fail again', async () => {

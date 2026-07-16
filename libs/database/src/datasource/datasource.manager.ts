@@ -149,22 +149,29 @@ export class DataSourceManager implements OnApplicationShutdown {
 
   async waitForRecovery(
     role: DatabaseRole,
-    maxWaitMs: number,
+    maxWaitMs?: number,
   ): Promise<boolean> {
-    const state =
-      role === DatabaseRole.WRITE
-        ? this.writer
-        : this.readers.length > 0
-          ? this.selectReader()
-          : this.writer;
+    return this.waitForRecoveryForState(this.getState(role), maxWaitMs);
+  }
 
-    await this.waitForHealthy(state, maxWaitMs);
+  async waitForRecoveryForState(
+    state: DataSourceState,
+    maxWaitMs?: number,
+  ): Promise<boolean> {
+    await this.waitForHealthy(
+      state,
+      maxWaitMs ??
+        this.options.retry?.readRecoveryTimeoutMs ??
+        DEFAULT_RETRY_OPTIONS.readRecoveryTimeoutMs,
+    );
     return state.healthy;
   }
 
   manager(role: DatabaseRole): EntityManager {
-    const state = this.getState(role);
+    return this.managerForState(this.getState(role));
+  }
 
+  managerForState(state: DataSourceState): EntityManager {
     if (!state.dataSource?.isInitialized || !state.healthy) {
       throw new ServiceUnavailableException(
         `Datasource '${state.name}' is not available.`,
@@ -187,8 +194,10 @@ export class DataSourceManager implements OnApplicationShutdown {
   }
 
   reportFailure(role: DatabaseRole, error: Error): void {
-    const state = this.getState(role);
+    this.reportFailureForState(this.getState(role), error);
+  }
 
+  reportFailureForState(state: DataSourceState, error: Error): void {
     this.updateHealth(state, { healthy: false });
 
     this.logger.error(
@@ -208,6 +217,29 @@ export class DataSourceManager implements OnApplicationShutdown {
     role: DatabaseRole,
   ): Repository<TEntity> {
     return this.manager(role).getRepository(entity);
+  }
+
+  repositoryForState<TEntity extends ObjectLiteral>(
+    entity: EntityTarget<TEntity>,
+    state: DataSourceState,
+  ): Repository<TEntity> {
+    return this.managerForState(state).getRepository(entity);
+  }
+
+  /**
+   * Selects (via the same round-robin as a normal read) and returns the
+   * concrete reader state a caller is about to use, so it can be threaded
+   * back into `reportFailureForState`/`waitForRecoveryForState` afterward
+   * instead of those independently re-selecting — see `readPinContext`.
+   * Returns `undefined` for WRITE, which always targets a single writer
+   * deterministically and therefore never needs pinning.
+   */
+  peekReadState(role: DatabaseRole): DataSourceState | undefined {
+    if (role !== DatabaseRole.READ) {
+      return undefined;
+    }
+
+    return this.getState(role);
   }
 
   async reconnect(role: DatabaseRole): Promise<void> {
@@ -478,6 +510,16 @@ export class DataSourceManager implements OnApplicationShutdown {
       error instanceof Error ? error : new Error(String(error));
   }
 
+  /**
+   * A `serverUuid` change means the TCP endpoint now answers as a genuinely
+   * different MySQL server (e.g. a failover promoted a new instance behind
+   * the same host/DNS name) — the pool must reconnect to pick up the new
+   * server's actual state. A `readOnly` flip alone does NOT reconnect: the
+   * existing connection to the same server is still perfectly valid, only
+   * that server's writer/reader role changed. This lib's writer/reader
+   * assignment is fixed at config time and is not auto-remapped from a role
+   * flip, so it's only logged/recorded here for observability/alerting.
+   */
   updateServerIdentity(
     state: DataSourceState,
     identity: {

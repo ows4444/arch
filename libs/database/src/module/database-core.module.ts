@@ -55,6 +55,8 @@ export class DatabaseCoreModule {
         RepositoryResolver,
         TransactionExecutor,
         DatabaseHealthService,
+        getDatabaseAccessorToken(DatabaseRole.READ),
+        getDatabaseAccessorToken(DatabaseRole.WRITE),
         ...repositoryProviders,
       ],
     };

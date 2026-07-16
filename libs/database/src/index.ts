@@ -5,6 +5,9 @@ export * from './repository/repository-resolver';
 
 export * from './decorators/database-repository.decorator';
 export * from './decorators/inject-repository.decorator';
+export * from './decorators/inject-database.decorator';
+
+export * from './database/database-accessor';
 
 export * from './constants/database-role.enum';
 

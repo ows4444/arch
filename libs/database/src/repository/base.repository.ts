@@ -70,8 +70,6 @@ export abstract class BaseRepository<TEntity extends ObjectLiteral> {
     return this.resolver.dataSource(this.role);
   }
 
-  private static readonly RECOVERY_TIMEOUT_MS = 2_000;
-
   protected runRead<T>(
     operation: () => Promise<T>,
     explicitManager?: EntityManager,
@@ -91,14 +89,31 @@ export abstract class BaseRepository<TEntity extends ObjectLiteral> {
     retryOnFailure: boolean,
     explicitManager?: EntityManager,
   ): Promise<T> {
+    // Only an automatic (no explicit manager), READ-role retry needs its
+    // reader pinned: WRITE always targets a single writer deterministically,
+    // and an explicit manager bypasses the resolver entirely. Pinning this
+    // reader up front means the failure-handling below reports/waits on the
+    // exact reader this attempt used, not one a fresh round-robin re-pick
+    // might land on.
+    const pinnedState =
+      retryOnFailure && !explicitManager && this.role === DatabaseRole.READ
+        ? this.resolver.peekReadState(this.role)
+        : undefined;
+
     try {
-      return await operation();
+      return await (pinnedState
+        ? this.resolver.withPinnedState(pinnedState, operation)
+        : operation());
     } catch (error) {
       if (!isDatabaseConnectivityError(error)) {
         throw error;
       }
 
-      this.resolver.reportFailure(this.role, error as Error);
+      if (pinnedState) {
+        this.resolver.reportFailure(this.role, error as Error, pinnedState);
+      } else {
+        this.resolver.reportFailure(this.role, error as Error);
+      }
 
       if (!retryOnFailure) {
         throw new ServiceUnavailableException(
@@ -114,13 +129,16 @@ export abstract class BaseRepository<TEntity extends ObjectLiteral> {
         );
       }
 
-      const recovered = await this.resolver.waitForRecovery(
-        this.role,
-        BaseRepository.RECOVERY_TIMEOUT_MS,
-      );
+      const recovered = pinnedState
+        ? await this.resolver.waitForRecovery(this.role, undefined, pinnedState)
+        : await this.resolver.waitForRecovery(this.role);
 
       if (recovered) {
-        return operation();
+        const retryState = this.resolver.peekReadState(this.role);
+
+        return retryState
+          ? this.resolver.withPinnedState(retryState, operation)
+          : operation();
       }
 
       throw new ServiceUnavailableException(
