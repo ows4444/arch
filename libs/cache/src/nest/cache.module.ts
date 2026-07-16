@@ -7,6 +7,7 @@ import {
   CacheModuleAsyncOptions,
   CacheModuleOptions,
 } from '../interfaces/cache.interfaces';
+import { CacheOptionsFactory } from '../interfaces/cache-options.factory.interface';
 import { CacheService } from './cache.service';
 import { CacheModuleValidator } from '../cache.module.validator';
 import { CacheInterceptor } from './cache.interceptor';
@@ -123,11 +124,7 @@ export class CacheModule {
       module: CacheModule,
       imports: options.imports ?? [],
       providers: [
-        {
-          provide: CACHE_OPTIONS,
-          useFactory: options.useFactory,
-          inject: options.inject ?? [],
-        },
+        ...this.createAsyncOptionsProviders(options),
         {
           provide: CacheRegistry,
           useFactory: (cacheOptions: CacheModuleOptions) => {
@@ -162,5 +159,44 @@ export class CacheModule {
         CacheInterceptor,
       ],
     };
+  }
+
+  private static createAsyncOptionsProviders(
+    options: CacheModuleAsyncOptions,
+  ): Provider[] {
+    if (options.useFactory) {
+      return [
+        {
+          provide: CACHE_OPTIONS,
+          useFactory: options.useFactory,
+          inject: options.inject ?? [],
+        },
+      ];
+    }
+
+    if (options.useExisting) {
+      return [
+        {
+          provide: CACHE_OPTIONS,
+          useFactory: (factory: CacheOptionsFactory) =>
+            factory.createCacheOptions(),
+          inject: [options.useExisting],
+        },
+      ];
+    }
+
+    if (options.useClass) {
+      return [
+        options.useClass,
+        {
+          provide: CACHE_OPTIONS,
+          useFactory: (factory: CacheOptionsFactory) =>
+            factory.createCacheOptions(),
+          inject: [options.useClass],
+        },
+      ];
+    }
+
+    throw new Error('Invalid CacheModuleAsyncOptions.');
   }
 }

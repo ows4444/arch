@@ -9,10 +9,10 @@ import { StatisticsAwareCache } from '../core/statistics-aware-cache.interface';
 import {
   CachePlugin,
   CachePluginErrorHandler,
-  defaultPluginErrorHandler,
+  runCachePlugins,
 } from '../interfaces/cache-plugin.interface';
 import { CacheSerializer } from '../interfaces/cache-serializer.interface';
-import { JsonCacheSerializer } from '../utils/serializer';
+import { SafeJsonCacheSerializer } from '../utils/serializer';
 
 export interface RedisClient {
   get(key: string): Promise<string | null>;
@@ -29,7 +29,7 @@ export interface RedisClient {
 export class RedisCacheStore<V> implements StatisticsAwareCache<string, V> {
   constructor(
     private readonly client: RedisClient,
-    private readonly serializer: CacheSerializer = new JsonCacheSerializer(),
+    private readonly serializer: CacheSerializer = new SafeJsonCacheSerializer(),
     private readonly namespace = 'cache',
     private readonly ttl?: number,
     private readonly plugins: readonly CachePlugin<string, V>[] = [],
@@ -50,16 +50,10 @@ export class RedisCacheStore<V> implements StatisticsAwareCache<string, V> {
     errors: 0,
   };
 
-  private async runPlugins(
+  private runPlugins(
     callback: (plugin: CachePlugin<string, V>) => Promise<void> | void,
   ): Promise<void> {
-    for (const plugin of this.plugins) {
-      try {
-        await callback(plugin);
-      } catch (error) {
-        (this.pluginErrorHandler ?? defaultPluginErrorHandler)(error, plugin);
-      }
-    }
+    return runCachePlugins(this.plugins, this.pluginErrorHandler, callback);
   }
 
   async getWithMetadata(key: string): Promise<CacheValue<V> | undefined> {

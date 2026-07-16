@@ -1,4 +1,6 @@
+import { Logger } from '@nestjs/common';
 import { CacheStatistics } from '../core/cache-statistics';
+import { CacheValue } from '../core/cache-entry-value.interface';
 import {
   Cache,
   CacheDeleteOptions,
@@ -8,8 +10,13 @@ import {
 import { isMetadataAwareCache } from '../core/is-metadata-aware-cache';
 import { isStatisticsAwareCache } from '../core/is-statistics-aware-cache';
 import { StatisticsAwareCache } from '../core/statistics-aware-cache.interface';
+import { MetadataAwareCache } from '../core/cache-metadata.interface';
 
-export class MultiLevelCache<K, V> implements StatisticsAwareCache<K, V> {
+export class MultiLevelCache<K, V>
+  implements StatisticsAwareCache<K, V>, MetadataAwareCache<K, V>
+{
+  private readonly logger = new Logger(MultiLevelCache.name);
+
   constructor(
     private readonly l1: Cache<K, V>,
     private readonly l2: Cache<K, V>,
@@ -41,20 +48,30 @@ export class MultiLevelCache<K, V> implements StatisticsAwareCache<K, V> {
     ]);
   }
 
-  private async safeKeys(cache: Cache<K, V>): Promise<readonly K[]> {
+  private async safeKeys(
+    cache: Cache<K, V>,
+    level: 'l1' | 'l2',
+  ): Promise<readonly K[]> {
     try {
       return await cache.keys();
-    } catch {
+    } catch (error) {
+      this.logger.debug(
+        `${level} cache does not support keys() enumeration; size()/keys() will only reflect the other level. (${error instanceof Error ? error.message : String(error)})`,
+      );
       return [];
     }
   }
 
   private async safeEntries(
     cache: Cache<K, V>,
+    level: 'l1' | 'l2',
   ): Promise<readonly (readonly [K, V])[]> {
     try {
       return await cache.entries();
-    } catch {
+    } catch (error) {
+      this.logger.debug(
+        `${level} cache does not support entries() enumeration; entries()/values() will only reflect the other level. (${error instanceof Error ? error.message : String(error)})`,
+      );
       return [];
     }
   }
@@ -93,6 +110,50 @@ export class MultiLevelCache<K, V> implements StatisticsAwareCache<K, V> {
     }
 
     return fallback;
+  }
+
+  /**
+   * Metadata-aware equivalent of `get()`. Implementing this (rather than
+   * leaving `MultiLevelCache` non-metadata-aware) matters when a
+   * multi-level cache is itself nested as another multi-level cache's L2:
+   * without it, `isMetadataAwareCache(l2)` would be false for the outer
+   * cache and promotion would fall back to the no-TTL path, letting a
+   * promoted value outlive the TTL it had in the inner L2.
+   */
+  async getWithMetadata(key: K): Promise<CacheValue<V> | undefined> {
+    const l1Entry = isMetadataAwareCache(this.l1)
+      ? await this.l1.getWithMetadata(key)
+      : await this.l1
+          .get(key)
+          .then((value) =>
+            value === undefined ? undefined : { value, ttl: undefined },
+          );
+
+    if (l1Entry) {
+      return l1Entry;
+    }
+
+    if (isMetadataAwareCache(this.l2)) {
+      const l2Entry = await this.l2.getWithMetadata(key);
+
+      if (!l2Entry) {
+        return undefined;
+      }
+
+      await this.l1.set(key, l2Entry.value, this.promoteOptions(l2Entry.ttl));
+
+      return l2Entry;
+    }
+
+    const fallback = await this.l2.get(key);
+
+    if (fallback === undefined) {
+      return undefined;
+    }
+
+    await this.l1.set(key, fallback);
+
+    return { value: fallback, ttl: undefined };
   }
 
   async set(key: K, value: V, options?: CacheSetOptions): Promise<void> {
@@ -144,11 +205,11 @@ export class MultiLevelCache<K, V> implements StatisticsAwareCache<K, V> {
   async keys(): Promise<readonly K[]> {
     const keys = new Set<K>();
 
-    for (const key of await this.safeKeys(this.l1)) {
+    for (const key of await this.safeKeys(this.l1, 'l1')) {
       keys.add(key);
     }
 
-    for (const key of await this.safeKeys(this.l2)) {
+    for (const key of await this.safeKeys(this.l2, 'l2')) {
       keys.add(key);
     }
 
@@ -164,11 +225,11 @@ export class MultiLevelCache<K, V> implements StatisticsAwareCache<K, V> {
   async entries(): Promise<readonly (readonly [K, V])[]> {
     const result = new Map<K, V>();
 
-    for (const [key, value] of await this.safeEntries(this.l2)) {
+    for (const [key, value] of await this.safeEntries(this.l2, 'l2')) {
       result.set(key, value);
     }
 
-    for (const [key, value] of await this.safeEntries(this.l1)) {
+    for (const [key, value] of await this.safeEntries(this.l1, 'l1')) {
       result.set(key, value);
     }
 

@@ -5,7 +5,7 @@ import { CacheEntry } from './core/cache-entry';
 import { MemoryCacheStorage } from './storage/memory-cache.storage';
 import { RedisCacheStore, RedisClient } from './caches/redis.cache';
 import { CacheSerializer } from './interfaces/cache-serializer.interface';
-import { JsonCacheSerializer } from './utils/serializer';
+import { SafeJsonCacheSerializer } from './utils/serializer';
 import { MultiLevelCache } from './caches/multi-level.cache';
 import {
   ReplacementPolicyFactory,
@@ -37,7 +37,7 @@ export class CacheFactory {
 
   static redis<V>(
     client: RedisClient,
-    serializer: CacheSerializer = new JsonCacheSerializer(),
+    serializer: CacheSerializer = new SafeJsonCacheSerializer(),
     namespace = 'cache',
     ttl?: number,
     plugins: readonly CachePlugin<string, V>[] = [],

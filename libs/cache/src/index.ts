@@ -16,6 +16,7 @@ export * from './core/cache-options';
 export * from './core/cache-storage.interface';
 
 export * from './interfaces/cache.interfaces';
+export * from './interfaces/cache-options.factory.interface';
 export * from './interfaces/cache-plugin.interface';
 export * from './interfaces/cache-serializer.interface';
 export * from './interfaces/clock.interface';

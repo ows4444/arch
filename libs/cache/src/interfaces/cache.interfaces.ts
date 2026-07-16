@@ -2,12 +2,14 @@ import {
   InjectionToken,
   ModuleMetadata,
   OptionalFactoryDependency,
+  Type,
 } from '@nestjs/common';
 import { RedisClient } from '../caches/redis.cache';
 import { ReplacementPolicyType } from '../policies/replacement-policy.factory';
 import { CacheSerializer } from './cache-serializer.interface';
 import { Clock } from './clock.interface';
 import { CachePlugin, CachePluginErrorHandler } from './cache-plugin.interface';
+import type { CacheOptionsFactory } from './cache-options.factory.interface';
 
 export interface MemoryCacheConfiguration {
   capacity: number;
@@ -17,6 +19,8 @@ export interface MemoryCacheConfiguration {
   slidingExpiration?: boolean;
 
   replacementPolicy?: ReplacementPolicyType;
+
+  cloneValues?: boolean;
 }
 
 export interface RedisCacheConfiguration {
@@ -69,7 +73,11 @@ export interface CacheModuleAsyncOptions extends Pick<
 > {
   inject?: (InjectionToken | OptionalFactoryDependency)[];
 
-  useFactory: (
+  useExisting?: Type<CacheOptionsFactory>;
+
+  useClass?: Type<CacheOptionsFactory>;
+
+  useFactory?: (
     ...args: readonly unknown[]
   ) => CacheModuleOptions | Promise<CacheModuleOptions>;
 

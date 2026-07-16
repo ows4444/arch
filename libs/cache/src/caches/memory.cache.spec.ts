@@ -9,6 +9,7 @@ function createCache<V>(
   overrides: {
     capacity?: number;
     slidingExpiration?: boolean;
+    cloneValues?: boolean;
     plugins?: readonly CachePlugin<string, V>[];
   } = {},
 ) {
@@ -20,6 +21,9 @@ function createCache<V>(
       capacity: overrides.capacity ?? 10,
       ...(overrides.slidingExpiration !== undefined && {
         slidingExpiration: overrides.slidingExpiration,
+      }),
+      ...(overrides.cloneValues !== undefined && {
+        cloneValues: overrides.cloneValues,
       }),
     },
     clock,
@@ -119,5 +123,77 @@ describe('MemoryCache', () => {
     clock.advance(60);
 
     await expect(cache.get('key')).resolves.toBe('v1');
+  });
+
+  describe('reference semantics', () => {
+    interface Mutable {
+      count: number;
+    }
+
+    it('by default (cloneValues off) hands out the same object reference on every get()', async () => {
+      const { cache } = createCache<Mutable>();
+      const original = { count: 1 };
+
+      await cache.set('key', original);
+      const first = await cache.get('key');
+      const second = await cache.get('key');
+
+      expect(first).toBe(original);
+      expect(second).toBe(original);
+    });
+
+    it('by default (cloneValues off) a mutation on a returned value corrupts the cached entry', async () => {
+      const { cache } = createCache<Mutable>();
+
+      await cache.set('key', { count: 1 });
+      const got = await cache.get('key');
+      got!.count = 999;
+
+      await expect(cache.get('key')).resolves.toEqual({ count: 999 });
+    });
+
+    it("with cloneValues on, set() isolates the cache from the caller's object", async () => {
+      const { cache } = createCache<Mutable>({ cloneValues: true });
+      const original = { count: 1 };
+
+      await cache.set('key', original);
+      original.count = 999;
+
+      await expect(cache.get('key')).resolves.toEqual({ count: 1 });
+    });
+
+    it('with cloneValues on, mutating a get() result does not affect the cached entry', async () => {
+      const { cache } = createCache<Mutable>({ cloneValues: true });
+
+      await cache.set('key', { count: 1 });
+      const got = await cache.get('key');
+      got!.count = 999;
+
+      await expect(cache.get('key')).resolves.toEqual({ count: 1 });
+    });
+
+    it('with cloneValues on, getWithMetadata() also returns an isolated copy', async () => {
+      const { cache } = createCache<Mutable>({ cloneValues: true });
+
+      await cache.set('key', { count: 1 });
+      const entry = await cache.getWithMetadata('key');
+      entry!.value.count = 999;
+
+      await expect(cache.get('key')).resolves.toEqual({ count: 1 });
+    });
+
+    it('with cloneValues on, values() and entries() return isolated copies', async () => {
+      const { cache } = createCache<Mutable>({ cloneValues: true });
+
+      await cache.set('key', { count: 1 });
+      const [value] = await cache.values();
+      value!.count = 999;
+
+      const [firstEntry] = await cache.entries();
+      const entryValue = firstEntry![1];
+      entryValue.count = 500;
+
+      await expect(cache.get('key')).resolves.toEqual({ count: 1 });
+    });
   });
 });

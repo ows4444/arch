@@ -33,3 +33,23 @@ export const defaultPluginErrorHandler: CachePluginErrorHandler = (
     'Cache',
   );
 };
+
+/**
+ * Runs `callback` for every plugin in order, isolating each plugin's
+ * failure via `errorHandler` (or `defaultPluginErrorHandler`) so one
+ * misbehaving plugin can neither abort the cache operation nor block the
+ * remaining plugins from running.
+ */
+export async function runCachePlugins<K, V>(
+  plugins: readonly CachePlugin<K, V>[],
+  errorHandler: CachePluginErrorHandler | undefined,
+  callback: (plugin: CachePlugin<K, V>) => Promise<void> | void,
+): Promise<void> {
+  for (const plugin of plugins) {
+    try {
+      await callback(plugin);
+    } catch (error) {
+      (errorHandler ?? defaultPluginErrorHandler)(error, plugin);
+    }
+  }
+}

@@ -10,7 +10,7 @@ import { Clock } from '../interfaces/clock.interface';
 import {
   CachePlugin,
   CachePluginErrorHandler,
-  defaultPluginErrorHandler,
+  runCachePlugins,
 } from '../interfaces/cache-plugin.interface';
 import { StatisticsAwareCache } from '../core/statistics-aware-cache.interface';
 import { CacheStatistics } from '../core/cache-statistics';
@@ -22,6 +22,16 @@ export interface MemoryCacheOptions {
   slidingExpiration?: boolean;
 
   cleanupInterval?: number;
+
+  /**
+   * By default `get`/`set` hand out and store the same object reference the
+   * caller used — mutating a returned value mutates the cached entry too,
+   * without going through `set()`. Set this to isolate the cache from the
+   * caller via `structuredClone` on both write and read. Only safe for
+   * structured-cloneable values (plain objects/arrays/primitives/Date/Map/
+   * Set/etc) — class instances lose their prototype, and functions throw.
+   */
+  cloneValues?: boolean;
 }
 
 export class MemoryCache<K, V> implements StatisticsAwareCache<K, V> {
@@ -62,16 +72,10 @@ export class MemoryCache<K, V> implements StatisticsAwareCache<K, V> {
     errors: 0,
   };
 
-  private async runPlugins(
+  private runPlugins(
     callback: (plugin: CachePlugin<K, V>) => Promise<void> | void,
   ): Promise<void> {
-    for (const plugin of this.plugins) {
-      try {
-        await callback(plugin);
-      } catch (error) {
-        (this.pluginErrorHandler ?? defaultPluginErrorHandler)(error, plugin);
-      }
-    }
+    return runCachePlugins(this.plugins, this.pluginErrorHandler, callback);
   }
 
   private async purgeExpired(): Promise<void> {
@@ -91,6 +95,10 @@ export class MemoryCache<K, V> implements StatisticsAwareCache<K, V> {
 
   private isExpired(entry: CacheEntry<V>): boolean {
     return entry.expiresAt !== undefined && entry.expiresAt <= this.clock.now();
+  }
+
+  private cloneValue(value: V): V {
+    return this.options.cloneValues ? structuredClone(value) : value;
   }
 
   private async doTouch(key: K): Promise<CacheEntry<V> | undefined> {
@@ -149,7 +157,7 @@ export class MemoryCache<K, V> implements StatisticsAwareCache<K, V> {
     await this.runPlugins((plugin) => plugin.afterGet?.(key, updated.value));
 
     return {
-      value: updated.value,
+      value: this.cloneValue(updated.value),
       ttl:
         updated.expiresAt === undefined
           ? undefined
@@ -182,7 +190,7 @@ export class MemoryCache<K, V> implements StatisticsAwareCache<K, V> {
     if (options?.touch === false) {
       await this.runPlugins((plugin) => plugin.afterGet?.(key, entry.value));
 
-      return entry.value;
+      return this.cloneValue(entry.value);
     }
 
     const updated = await this.writeLock(() => this.doTouch(key));
@@ -197,7 +205,7 @@ export class MemoryCache<K, V> implements StatisticsAwareCache<K, V> {
 
     await this.runPlugins((plugin) => plugin.afterGet?.(key, updated.value));
 
-    return updated.value;
+    return this.cloneValue(updated.value);
   }
 
   async set(key: K, value: V, options?: CacheSetOptions): Promise<void> {
@@ -212,9 +220,11 @@ export class MemoryCache<K, V> implements StatisticsAwareCache<K, V> {
 
   private async doSet(
     key: K,
-    value: V,
+    rawValue: V,
     options?: CacheSetOptions,
   ): Promise<void> {
+    const value = this.cloneValue(rawValue);
+
     let entry = await this.store.get(key);
 
     const ttl = options?.ttl ?? this.options.ttl;
@@ -327,12 +337,14 @@ export class MemoryCache<K, V> implements StatisticsAwareCache<K, V> {
 
   async values(): Promise<readonly V[]> {
     const entries = await this.store.entries();
-    return entries.map(([, entry]) => entry.value);
+    return entries.map(([, entry]) => this.cloneValue(entry.value));
   }
 
   async entries(): Promise<readonly (readonly [K, V])[]> {
     const entries = await this.store.entries();
-    return entries.map(([key, entry]) => [key, entry.value] as const);
+    return entries.map(
+      ([key, entry]) => [key, this.cloneValue(entry.value)] as const,
+    );
   }
 
   async statistics(): Promise<Readonly<CacheStatistics>> {
