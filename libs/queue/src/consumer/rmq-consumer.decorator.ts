@@ -1,16 +1,13 @@
 import { SetMetadata } from '@nestjs/common';
 import { RMQ_HANDLER_METADATA } from '../queue.constants';
-import type { RmqConsumerOptions } from '../queue.types';
+import type { RMQQueueRef, RmqConsumerOptions } from '../queue.types';
 
 interface ConsumerDecoratorOptions {
   payload?: RmqConsumerOptions['payloadType'];
   prefetch?: number;
 }
 
-interface QueueContract {
-  EXCHANGE_NAME: string;
-  QUEUE_NAME: string;
-  ROUTING_KEY: string;
+interface QueueContract extends RMQQueueRef {
   RETRY_POLICY?: RmqConsumerOptions['retryPolicy'];
 }
 

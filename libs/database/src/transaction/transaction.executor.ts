@@ -2,7 +2,7 @@ import { EntityManager, QueryRunner } from 'typeorm';
 import { DataSourceManager } from '../datasource/datasource.manager';
 import { transactionContext } from './transaction.context';
 import { DatabaseRole } from '../constants/database-role.enum';
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { IsolationLevel } from './isolation-level';
 import { TransactionPropagation } from './transaction.constants';
 
@@ -16,6 +16,8 @@ export interface TransactionOptions {
 
 @Injectable()
 export class TransactionExecutor {
+  private readonly logger = new Logger(TransactionExecutor.name);
+
   constructor(private readonly dataSourceManager: DataSourceManager) {}
 
   async execute<T>(
@@ -55,6 +57,13 @@ export class TransactionExecutor {
     }
 
     if (
+      options?.propagation === TransactionPropagation.NOT_SUPPORTED &&
+      !transactionContext.active
+    ) {
+      return callback();
+    }
+
+    if (
       options?.propagation === TransactionPropagation.REQUIRES_NEW &&
       !options.queryRunner
     ) {
@@ -71,10 +80,12 @@ export class TransactionExecutor {
           await runner.startTransaction();
         }
 
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const { manager: _manager, ...restOptions } = options;
+
         const result = await transactionContext.runWithoutTransaction(() =>
           this.execute(callback, {
-            ...options,
-            manager: undefined,
+            ...restOptions,
             queryRunner: runner,
           }),
         );
@@ -110,13 +121,14 @@ export class TransactionExecutor {
       );
     }
 
-    if (
-      options?.propagation === TransactionPropagation.NEVER &&
-      transactionContext.active
-    ) {
-      throw new Error(
-        'Transaction propagation NEVER must not execute inside an active transaction.',
-      );
+    if (options?.propagation === TransactionPropagation.NEVER) {
+      if (transactionContext.active) {
+        throw new Error(
+          'Transaction propagation NEVER must not execute inside an active transaction.',
+        );
+      }
+
+      return callback();
     }
 
     if (
@@ -157,41 +169,54 @@ export class TransactionExecutor {
 
     const transaction = async (manager: EntityManager): Promise<T> => {
       const operation = async (): Promise<T> => {
-        try {
-          const result = await transactionContext.run(manager, callback);
+        return transactionContext.run(manager, async () => {
+          try {
+            const result = await callback();
 
-          await transactionContext.commit();
+            await transactionContext.commit();
 
-          return result;
-        } catch (error) {
-          if (error instanceof Error) {
-            await transactionContext.rollback(error);
+            return result;
+          } catch (error) {
+            if (error instanceof Error) {
+              await transactionContext.rollback(error);
+            }
+
+            throw error;
           }
-
-          throw error;
-        }
+        });
       };
 
       if (!options?.timeoutMs) {
         return operation();
       }
 
+      const operationPromise = operation();
+
       let timer: NodeJS.Timeout | undefined;
+      let timedOut = false;
+
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          reject(
+            new Error(
+              `Transaction exceeded timeout (${options.timeoutMs} ms).`,
+            ),
+          );
+        }, options.timeoutMs);
+      });
 
       try {
-        return await Promise.race([
-          operation(),
-          new Promise<T>((_, reject) => {
-            timer = setTimeout(() => {
-              reject(
-                new Error(
-                  `Transaction exceeded timeout (${options.timeoutMs} ms).`,
-                ),
-              );
-            }, options.timeoutMs);
-          }),
-        ]);
+        return await Promise.race([operationPromise, timeoutPromise]);
       } catch (error) {
+        if (timedOut) {
+          this.logger.warn(
+            `Transaction exceeded timeout (${options.timeoutMs} ms); waiting for it to finish rather than aborting, since the in-flight query cannot be cancelled.`,
+          );
+
+          return await operationPromise;
+        }
+
         if (error instanceof Error) {
           await transactionContext.rollback(error);
         }

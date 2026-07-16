@@ -1,15 +1,9 @@
-import type { RmqTopologyDefinition } from '../queue.types';
+import type { RMQQueueRef, RmqTopologyDefinition } from '../queue.types';
 import { assertEntityName, QueueContractOptions } from './topology.contracts';
 
 export type QueueDefinition = QueueContractOptions;
 
-export interface CompiledQueueDefinition {
-  EXCHANGE_NAME: string;
-
-  QUEUE_NAME: string;
-
-  ROUTING_KEY: string;
-
+export interface CompiledQueueDefinition extends RMQQueueRef {
   DURABLE: boolean;
 
   ARGUMENTS?: Record<string, unknown>;
@@ -64,6 +58,10 @@ export function defineTopology<
   for (const key in definition.queues) {
     const queue = definition.queues[key];
 
+    if (!queue) {
+      continue;
+    }
+
     assertEntityName(queue.routingKey, `Routing key (${key})`);
 
     assertEntityName(
@@ -82,18 +80,22 @@ export function defineTopology<
 
       ARGUMENTS: queue.arguments ?? {},
 
-      DEAD_LETTER_QUEUE: queue.dlq
+      ...(queue.dlq
         ? {
-            QUEUE_NAME: `${queue.queueName ?? queue.routingKey}.dlq`,
-            ROUTING_KEY: `${queue.routingKey}.dlq`,
+            DEAD_LETTER_QUEUE: {
+              QUEUE_NAME: `${queue.queueName ?? queue.routingKey}.dlq`,
+              ROUTING_KEY: `${queue.routingKey}.dlq`,
+            },
           }
-        : undefined,
+        : {}),
 
-      RETRY_POLICY: queue.retry
+      ...(queue.retry
         ? {
-            strategy: queue.retry.strategy,
+            RETRY_POLICY: {
+              strategy: queue.retry.strategy,
+            },
           }
-        : undefined,
+        : {}),
     };
   }
 
@@ -108,14 +110,16 @@ export function defineTopology<
       queue: queue.QUEUE_NAME,
       routingKey: queue.ROUTING_KEY,
       durable: queue.DURABLE,
-      arguments: queue.ARGUMENTS,
-      retryPolicy: queue.RETRY_POLICY,
-      deadLetterQueue: queue.DEAD_LETTER_QUEUE
+      arguments: queue.ARGUMENTS ?? {},
+      ...(queue.RETRY_POLICY ? { retryPolicy: queue.RETRY_POLICY } : {}),
+      ...(queue.DEAD_LETTER_QUEUE
         ? {
-            queue: queue.DEAD_LETTER_QUEUE.QUEUE_NAME,
-            routingKey: queue.DEAD_LETTER_QUEUE.ROUTING_KEY,
+            deadLetterQueue: {
+              queue: queue.DEAD_LETTER_QUEUE.QUEUE_NAME,
+              routingKey: queue.DEAD_LETTER_QUEUE.ROUTING_KEY,
+            },
           }
-        : undefined,
+        : {}),
     })),
 
     QUEUES: queues,

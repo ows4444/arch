@@ -58,18 +58,17 @@ export class TopologyBootstrap implements OnModuleInit {
 
   private async setupTopology(channel: Channel): Promise<void> {
     for (const topology of this.options.topology ?? []) {
-      await channel.assertExchange(
-        topology.exchange,
-        topology.type ?? 'topic',
-        {
-          durable: topology.durable ?? true,
-        },
-      );
+      const exchangeType = topology.type ?? 'topic';
+
+      await channel.assertExchange(topology.exchange, exchangeType, {
+        durable: topology.durable ?? true,
+      });
 
       for (const queue of topology.queues) {
         await this.setupQueue({
           channel,
           exchange: topology.exchange,
+          exchangeType,
           queue,
         });
       }
@@ -79,18 +78,29 @@ export class TopologyBootstrap implements OnModuleInit {
   private async setupQueue(params: {
     channel: Channel;
     exchange: string;
+    exchangeType: 'direct' | 'topic' | 'fanout' | 'headers';
     queue: RmqQueueDefinition;
   }): Promise<void> {
-    const { channel, exchange, queue } = params;
+    const { channel, exchange, exchangeType, queue } = params;
+
+    const deadLetterExchange = queue.deadLetterQueue
+      ? await this.resolveDeadLetterExchange({
+          channel,
+          exchange,
+          exchangeType,
+          queue,
+        })
+      : undefined;
 
     await channel.assertQueue(queue.queue, {
       durable: queue.durable ?? true,
       arguments: {
         ...queue.arguments,
-        ...(queue.deadLetterQueue && {
-          'x-dead-letter-exchange': exchange,
-          'x-dead-letter-routing-key': queue.deadLetterQueue.routingKey,
-        }),
+        ...(queue.deadLetterQueue &&
+          deadLetterExchange && {
+            'x-dead-letter-exchange': deadLetterExchange,
+            'x-dead-letter-routing-key': queue.deadLetterQueue.routingKey,
+          }),
       },
     });
 
@@ -103,9 +113,30 @@ export class TopologyBootstrap implements OnModuleInit {
 
       await channel.bindQueue(
         queue.deadLetterQueue.queue,
-        exchange,
+        deadLetterExchange ?? exchange,
         queue.deadLetterQueue.routingKey,
       );
     }
+  }
+
+  private async resolveDeadLetterExchange(params: {
+    channel: Channel;
+    exchange: string;
+    exchangeType: 'direct' | 'topic' | 'fanout' | 'headers';
+    queue: RmqQueueDefinition;
+  }): Promise<string> {
+    const { channel, exchange, exchangeType, queue } = params;
+
+    if (exchangeType !== 'fanout') {
+      return exchange;
+    }
+
+    const deadLetterExchangeName = `${exchange}.dlx.${queue.queue}`;
+
+    await channel.assertExchange(deadLetterExchangeName, 'direct', {
+      durable: true,
+    });
+
+    return deadLetterExchangeName;
   }
 }

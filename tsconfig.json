@@ -10,6 +10,10 @@
     "emitDecoratorMetadata": true,
     "experimentalDecorators": true,
     "allowSyntheticDefaultImports": true,
+    "types": [
+      "node",
+      "jest"
+    ],
     "target": "ES2023",
     "sourceMap": true,
     "outDir": "./dist",
@@ -22,12 +26,30 @@
     "noUncheckedIndexedAccess": true,
     "noFallthroughCasesInSwitch": true,
     "paths": {
-      "@/cache": ["libs/cache/src"],
-      "@/cache/*": ["libs/cache/src/*"],
-      "@/database": ["libs/database/src"],
-      "@/database/*": ["libs/database/src/*"],
-      "@/queue": ["libs/queue/src"],
-      "@/queue/*": ["libs/queue/src/*"]
+      "@/cache": [
+        "libs/cache/src"
+      ],
+      "@/cache/*": [
+        "libs/cache/src/*"
+      ],
+      "@/database": [
+        "libs/database/src"
+      ],
+      "@/database/*": [
+        "libs/database/src/*"
+      ],
+      "@/queue": [
+        "libs/queue/src"
+      ],
+      "@/queue/*": [
+        "libs/queue/src/*"
+      ],
+      "@/workflow": [
+        "libs/workflow/src"
+      ],
+      "@/workflow/*": [
+        "libs/workflow/src/*"
+      ]
     }
   }
 }

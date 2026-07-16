@@ -11,3 +11,20 @@ export * from './errors/non-retryable-message.error';
 export * from './errors/handler-timeout.error';
 export * from './errors/queue-configuration.error';
 export * from './utils/abort.utils';
+
+/*
+ * Outbox / Inbox
+ */
+export * from './outbox/outbox.service';
+export * from './outbox/outbox.types';
+export * from './inbox/queue-inbox.service';
+export {
+  QUEUE_TYPEORM_ENTITIES,
+  QueueOutboxEntity,
+  QueueInboxEntity,
+} from './persistence/entities';
+export type { QueueOutboxStatus } from './persistence/entities';
+export {
+  QUEUE_MIGRATIONS,
+  InitialQueueOutboxInboxSchema1752100000000,
+} from './persistence/migrations';

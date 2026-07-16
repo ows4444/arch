@@ -260,8 +260,6 @@ async function run() {
   console.log(`✔ done. Total parts: ${part - 1}`);
 }
 
-// ---- Entry ----
-
 run().catch((err) => {
   console.error('Fatal error:', err);
   process.exit(1);

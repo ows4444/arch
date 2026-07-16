@@ -93,8 +93,23 @@ export class DefaultCacheManager implements CacheManager {
       return;
     }
 
-    await Promise.all(
-      this.registry.names().map((name) => this.registry.get(name).clear()),
+    const names = this.registry.names();
+    const results = await Promise.allSettled(
+      names.map((name) => this.registry.get(name).clear()),
     );
+
+    const failures = results
+      .map((result, index) => ({ result, name: names[index] }))
+      .filter(
+        (entry): entry is { result: PromiseRejectedResult; name: string } =>
+          entry.result.status === 'rejected',
+      );
+
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures.map((failure): unknown => failure.result.reason),
+        `Failed to clear cache(s): ${failures.map((failure) => failure.name).join(', ')}.`,
+      );
+    }
   }
 }

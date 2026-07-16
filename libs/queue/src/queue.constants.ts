@@ -8,6 +8,10 @@ export const RMQ_MAX_ENTITY_NAME_BYTES = 255;
 
 export const RMQ_DEFAULT_PREFETCH = 10;
 
+export const QUEUE_OUTBOX_OPTIONS = Symbol('QUEUE_OUTBOX_OPTIONS');
+
+export const QUEUE_INBOX_SERVICE = Symbol('QUEUE_INBOX_SERVICE');
+
 export const RMQ_HEADERS = {
   REQUEST_ID: 'x-request-id',
 

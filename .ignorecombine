@@ -1,0 +1,3 @@
+libs/*
+test/*
+*.spec.ts

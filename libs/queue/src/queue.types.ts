@@ -1,5 +1,14 @@
 import type { ClassConstructor } from 'class-transformer';
 import { ResolvedRetryPolicy } from './topology/topology.contracts';
+import type { QueueOutboxOptions } from './outbox/outbox.types';
+
+export interface RMQQueueRef {
+  EXCHANGE_NAME: string;
+
+  QUEUE_NAME: string;
+
+  ROUTING_KEY: string;
+}
 
 export interface QueueModuleOptions {
   uri: string;
@@ -9,6 +18,10 @@ export interface QueueModuleOptions {
   prefetch?: number;
 
   connectionName?: string;
+
+  outbox?: QueueOutboxOptions;
+
+  inbox?: boolean;
 }
 
 export interface RmqTopologyDefinition {

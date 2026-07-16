@@ -1,4 +1,5 @@
 import {
+  Inject,
   Injectable,
   Logger,
   OnApplicationShutdown,
@@ -11,10 +12,11 @@ import { RMQContextFactory } from '../context/rmq-context.factory';
 import { HandlerTimeoutError } from '../errors/handler-timeout.error';
 import { QueueConfigurationError } from '../errors/queue-configuration.error';
 import { RetryableMessageError } from '../errors/retryable-message.error';
+import { QUEUE_INBOX_SERVICE } from '../queue.constants';
+import type { QueueInboxService } from '../inbox/queue-inbox.service';
 import { classifyPublishError } from '../publisher/rmq-publish-error.utils';
 import { RMQPublisher } from '../publisher/rmq.publisher';
 import { RMQSerializer } from '../publisher/serializer';
-import { RMQ_HEADERS } from '../queue.constants';
 import { RMQContext } from '../queue.types';
 import { buildRetryQueueName } from '../retry/retry-queue.naming';
 import { TopologyBootstrap } from '../topology/topology.bootstrap';
@@ -58,6 +60,9 @@ export class RMQConsumerRuntime implements OnModuleInit, OnApplicationShutdown {
     private readonly contextFactory: RMQContextFactory,
     private readonly topologyBootstrap: TopologyBootstrap,
     private readonly publisher: RMQPublisher,
+
+    @Inject(QUEUE_INBOX_SERVICE)
+    private readonly inbox: QueueInboxService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -130,30 +135,38 @@ export class RMQConsumerRuntime implements OnModuleInit, OnApplicationShutdown {
 
     this.activeControllers.add(abortController);
 
-    const context = this.contextFactory.create({
-      message,
-      queue: handler.options.queue,
-      signal: abortController.signal,
-    });
-
-    // payload is intentionally declared outside try so it's accessible in the
-    // catch block for retry publishing. If deserialization throws, it remains
-    // undefined — publishRetry guards against that and throws QueueConfigurationError.
+    let context: RMQContext | undefined;
     let payload: unknown;
 
+    let outcome: 'handled' | 'retry-scheduled' | undefined;
+    let retryCountForLog = 0;
+
+    let handlerSettled: Promise<void> = Promise.resolve();
+
     try {
+      context = this.contextFactory.create({
+        message,
+        queue: handler.options.queue,
+        signal: abortController.signal,
+      });
+
       const rawPayload = RMQSerializer.deserialize(message.content);
 
       payload = this.validatePayload({ payload: rawPayload, handler });
 
-      await this.executeHandler({
-        handler,
-        payload,
-        context,
+      const handlerPromise = this.invokeHandler({ handler, payload, context });
+
+      handlerSettled = handlerPromise.then(
+        () => undefined,
+        () => undefined,
+      );
+
+      await this.withTimeout({
+        promise: handlerPromise,
         controller: abortController,
       });
 
-      settlement.ack();
+      outcome = 'handled';
     } catch (error: unknown) {
       const err =
         error instanceof Error
@@ -176,8 +189,11 @@ export class RMQConsumerRuntime implements OnModuleInit, OnApplicationShutdown {
         stack: err.stack,
       });
 
-      if (!retryDecision.shouldRetry) {
-        settlement.nack(false);
+      if (!retryDecision.shouldRetry || !context) {
+        this.safeNack(settlement, {
+          queue: handler.options.queue,
+          requeue: false,
+        });
 
         return;
       }
@@ -193,13 +209,8 @@ export class RMQConsumerRuntime implements OnModuleInit, OnApplicationShutdown {
           retryCount: retryDecision.retryCount,
         });
 
-        settlement.ack();
-
-        this.logger.debug({
-          message: 'RabbitMQ message scheduled for retry',
-          queue: handler.options.queue,
-          retryCount: retryDecision.retryCount + 1,
-        });
+        outcome = 'retry-scheduled';
+        retryCountForLog = retryDecision.retryCount + 1;
       } catch (publishError: unknown) {
         const isRetryQueueFull =
           publishError instanceof Error
@@ -217,18 +228,64 @@ export class RMQConsumerRuntime implements OnModuleInit, OnApplicationShutdown {
               : 'Unknown error',
         });
 
-        // Dead-letter on retry-queue-full (x-overflow: reject-publish) or any
-        // configuration error (no retry policy, missing messageId, etc.) — both
-        // are permanent conditions that requeuing cannot resolve.
-        // Requeue only on transient broker errors (timeout, connection closed)
-        // so the message is retried once the broker recovers.
-        settlement.nack(!isRetryQueueFull && !isConfigError);
+        this.safeNack(settlement, {
+          queue: handler.options.queue,
+          requeue: !isRetryQueueFull && !isConfigError,
+        });
+
+        return;
       }
     } finally {
       this.activeControllers.delete(abortController);
       abortController.abort();
-      this.decrementInflight();
       this.logSlowHandler({ startedAt, handler });
+
+      void handlerSettled.finally(() => this.decrementInflight());
+    }
+
+    this.safeAck(settlement, { queue: handler.options.queue });
+
+    if (outcome === 'retry-scheduled') {
+      this.logger.debug({
+        message: 'RabbitMQ message scheduled for retry',
+        queue: handler.options.queue,
+        retryCount: retryCountForLog,
+      });
+    }
+  }
+
+  private safeAck(
+    settlement: MessageSettlement,
+    context: { queue: string },
+  ): void {
+    try {
+      settlement.ack();
+    } catch (error: unknown) {
+      this.logger.error({
+        message:
+          'RMQ ack failed; the message was already processed successfully ' +
+          'and will be redelivered by the broker once the channel/connection ' +
+          'recovers, rather than retried via the application retry policy',
+        queue: context.queue,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+  }
+
+  private safeNack(
+    settlement: MessageSettlement,
+    context: { queue: string; requeue: boolean },
+  ): void {
+    try {
+      settlement.nack(context.requeue);
+    } catch (error: unknown) {
+      this.logger.error({
+        message:
+          'RMQ nack failed; the broker will redeliver the message once the ' +
+          'channel/connection recovers',
+        queue: context.queue,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
     }
   }
 
@@ -325,8 +382,8 @@ export class RMQConsumerRuntime implements OnModuleInit, OnApplicationShutdown {
     handler: RMQHandlerDefinition;
     payload: unknown;
     requestId: string;
-    correlationId?: string;
-    causationId?: string;
+    correlationId?: string | undefined;
+    causationId?: string | undefined;
     message: ConsumeMessage;
     retryCount: number;
   }): Promise<void> {
@@ -385,10 +442,10 @@ export class RMQConsumerRuntime implements OnModuleInit, OnApplicationShutdown {
         requestId,
         correlationId,
         causationId,
+        retryCount: retryCount + 1,
         options: {
           headers: {
             ...(message.properties.headers ?? {}),
-            [RMQ_HEADERS.RETRY_COUNT]: retryCount + 1,
           },
         },
       },
@@ -416,19 +473,38 @@ export class RMQConsumerRuntime implements OnModuleInit, OnApplicationShutdown {
     return { shouldRetry, retryCount };
   }
 
-  private async executeHandler(params: {
+  private invokeHandler(params: {
     handler: RMQHandlerDefinition;
     payload: unknown;
     context: RMQContext;
-    controller: AbortController;
   }): Promise<void> {
-    const { handler, payload, context, controller } = params;
+    const { handler, payload, context } = params;
 
-    const handlerPromise = Promise.resolve().then(() =>
-      handler.invoke(payload, context),
-    );
+    const invoke = () => Promise.resolve(handler.invoke(payload, context));
 
-    await this.withTimeout({ promise: handlerPromise, controller });
+    if (!context.messageId) {
+      this.logger.warn({
+        message:
+          'RMQ message has no messageId; consuming without inbox idempotency protection',
+        queue: handler.options.queue,
+      });
+
+      return Promise.resolve().then(invoke);
+    }
+
+    return this.inbox
+      .withIdempotency(handler.options.queue, context.messageId, invoke)
+      .then((ran) => {
+        if (ran) {
+          return;
+        }
+
+        this.logger.debug({
+          message: 'RMQ message already processed; skipped as duplicate',
+          queue: handler.options.queue,
+          messageId: context.messageId,
+        });
+      });
   }
 
   private validatePayload(params: {

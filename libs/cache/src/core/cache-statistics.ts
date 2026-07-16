@@ -10,4 +10,6 @@ export interface CacheStatistics {
   evictions: number;
 
   expirations: number;
+
+  errors: number;
 }

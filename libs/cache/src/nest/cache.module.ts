@@ -1,4 +1,4 @@
-import { DynamicModule, Module } from '@nestjs/common';
+import { DynamicModule, Module, Provider } from '@nestjs/common';
 import { CACHE, CACHE_MANAGER, CACHE_OPTIONS } from '../cache.constants';
 import { CacheFactory } from '../cache.factory';
 import { CacheRegistry } from '../cache-registry';
@@ -94,10 +94,7 @@ export class CacheModule {
             new DefaultCacheManager(registry),
           inject: [CacheRegistry],
         },
-        {
-          provide: APP_INTERCEPTOR,
-          useClass: CacheInterceptor,
-        },
+        ...this.interceptorProviders(options.registerInterceptor),
         CacheService,
         CacheInterceptor,
       ],
@@ -109,6 +106,16 @@ export class CacheModule {
         CacheInterceptor,
       ],
     };
+  }
+
+  private static interceptorProviders(
+    registerInterceptor: boolean | undefined,
+  ): Provider[] {
+    if (registerInterceptor === false) {
+      return [];
+    }
+
+    return [{ provide: APP_INTERCEPTOR, useClass: CacheInterceptor }];
   }
 
   static forRootAsync(options: CacheModuleAsyncOptions): DynamicModule {
@@ -143,10 +150,7 @@ export class CacheModule {
             new DefaultCacheManager(registry),
           inject: [CacheRegistry],
         },
-        {
-          provide: APP_INTERCEPTOR,
-          useClass: CacheInterceptor,
-        },
+        ...this.interceptorProviders(options.registerInterceptor),
         CacheService,
         CacheInterceptor,
       ],

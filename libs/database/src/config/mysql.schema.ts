@@ -1,5 +1,6 @@
 import { Expose, Transform } from 'class-transformer';
 import {
+  IsIn,
   IsInt,
   IsNotEmpty,
   IsOptional,
@@ -43,7 +44,14 @@ export class MySQLEnvironmentSchema {
   @Expose()
   @IsString()
   @IsOptional()
+  @IsIn(['true', 'false'])
   MYSQL_SYNCHRONIZE!: string;
+
+  @Expose()
+  @IsString()
+  @IsOptional()
+  @IsIn(['true', 'false'])
+  MYSQL_MIGRATIONS_RUN!: string;
 
   @Expose()
   @IsString()
@@ -53,6 +61,7 @@ export class MySQLEnvironmentSchema {
   @Expose()
   @IsString()
   @IsOptional()
+  @IsIn(['true', 'false'])
   MYSQL_SSL!: string;
 
   @Expose()
@@ -66,6 +75,7 @@ export class MySQLEnvironmentSchema {
   @Expose()
   @IsString()
   @IsOptional()
+  @IsIn(['true', 'false'])
   MYSQL_REPLICA!: string;
 
   @Expose()
@@ -110,6 +120,7 @@ export class MySQLEnvironmentSchema {
   @Expose()
   @IsString()
   @IsOptional()
+  @IsIn(['true', 'false'])
   MYSQL_REPLICA_SYNCHRONIZE!: string;
 
   @Expose()
@@ -120,6 +131,7 @@ export class MySQLEnvironmentSchema {
   @Expose()
   @IsString()
   @IsOptional()
+  @IsIn(['true', 'false'])
   MYSQL_REPLICA_SSL!: string;
 
   @Expose()

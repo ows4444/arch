@@ -17,12 +17,23 @@ export class DefaultDatabaseOptionsFactory implements DatabaseOptionsFactory {
   createDatabaseOptions(): ResolvedDatabaseOptions {
     const database = this.config.getOrThrow<MySQLBothEnvironment>(MYSQL_ENV);
 
+    const entities =
+      this.options.entities !== undefined
+        ? { entities: this.options.entities }
+        : {};
+
+    const migrations =
+      this.options.migrations !== undefined
+        ? { migrations: this.options.migrations }
+        : {};
+
     return {
       writer: {
         ...database.master,
         name: 'writer',
 
-        entities: this.options.entities,
+        ...entities,
+        ...migrations,
       },
 
       readers: database.replicaMode
@@ -30,7 +41,7 @@ export class DefaultDatabaseOptionsFactory implements DatabaseOptionsFactory {
             {
               ...database.replica,
               name: 'reader',
-              entities: this.options.entities,
+              ...entities,
             },
           ]
         : [],

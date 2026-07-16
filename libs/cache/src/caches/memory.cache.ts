@@ -26,6 +26,13 @@ export interface MemoryCacheOptions {
 
 export class MemoryCache<K, V> implements StatisticsAwareCache<K, V> {
   private cleanupCounter = 0;
+  private lock: Promise<unknown> = Promise.resolve();
+
+  private writeLock<T>(fn: () => Promise<T>): Promise<T> {
+    const result = this.lock.then(fn, fn);
+    this.lock = result.catch(() => undefined);
+    return result;
+  }
 
   constructor(
     private readonly store: CacheStorage<K, CacheEntry<V>>,
@@ -52,6 +59,7 @@ export class MemoryCache<K, V> implements StatisticsAwareCache<K, V> {
     deletes: 0,
     evictions: 0,
     expirations: 0,
+    errors: 0,
   };
 
   private async runPlugins(
@@ -85,24 +93,67 @@ export class MemoryCache<K, V> implements StatisticsAwareCache<K, V> {
     return entry.expiresAt !== undefined && entry.expiresAt <= this.clock.now();
   }
 
+  private async doTouch(key: K): Promise<CacheEntry<V> | undefined> {
+    const entry = await this.store.get(key);
+
+    if (!entry || this.isExpired(entry)) {
+      return undefined;
+    }
+
+    const updated: CacheEntry<V> = {
+      ...entry,
+      accessedAt: this.clock.now(),
+      accessCount: entry.accessCount + 1,
+      expiresAt:
+        this.options.slidingExpiration && entry.ttl !== undefined
+          ? this.clock.now() + entry.ttl
+          : entry.expiresAt,
+    };
+
+    await this.store.set(key, updated);
+    this.policy.onGet(key);
+
+    return updated;
+  }
+
   async getWithMetadata(key: K): Promise<CacheValue<V> | undefined> {
+    await this.tryCleanup();
+
+    await this.runPlugins((plugin) => plugin.beforeGet?.(key));
+
     const entry = await this.store.get(key);
 
     if (!entry) {
+      this.stats.misses++;
+      await this.runPlugins((plugin) => plugin.afterGet?.(key, undefined));
       return undefined;
     }
 
     if (this.isExpired(entry)) {
+      this.stats.misses++;
       await this.deleteExpired(key);
+      await this.runPlugins((plugin) => plugin.afterGet?.(key, undefined));
       return undefined;
     }
 
+    const updated = await this.writeLock(() => this.doTouch(key));
+
+    if (!updated) {
+      this.stats.misses++;
+      await this.runPlugins((plugin) => plugin.afterGet?.(key, undefined));
+      return undefined;
+    }
+
+    this.stats.hits++;
+
+    await this.runPlugins((plugin) => plugin.afterGet?.(key, updated.value));
+
     return {
-      value: entry.value,
+      value: updated.value,
       ttl:
-        entry.expiresAt === undefined
+        updated.expiresAt === undefined
           ? undefined
-          : Math.max(0, entry.expiresAt - this.clock.now()),
+          : Math.max(0, updated.expiresAt - this.clock.now()),
     };
   }
 
@@ -134,21 +185,13 @@ export class MemoryCache<K, V> implements StatisticsAwareCache<K, V> {
       return entry.value;
     }
 
-    const ttl = this.options.ttl;
+    const updated = await this.writeLock(() => this.doTouch(key));
 
-    const updated: CacheEntry<V> = {
-      ...entry,
-      accessedAt: this.clock.now(),
-      accessCount: entry.accessCount + 1,
-      expiresAt:
-        this.options.slidingExpiration && ttl !== undefined
-          ? this.clock.now() + ttl
-          : entry.expiresAt,
-    };
-
-    await this.store.set(key, updated);
-
-    this.policy.onGet(key);
+    if (!updated) {
+      this.stats.misses++;
+      await this.runPlugins((plugin) => plugin.afterGet?.(key, undefined));
+      return undefined;
+    }
 
     this.stats.hits++;
 
@@ -161,6 +204,17 @@ export class MemoryCache<K, V> implements StatisticsAwareCache<K, V> {
     await this.runPlugins((plugin) => plugin.beforeSet?.(key, value));
 
     await this.tryCleanup();
+
+    await this.writeLock(() => this.doSet(key, value, options));
+
+    await this.runPlugins((plugin) => plugin.afterSet?.(key, value));
+  }
+
+  private async doSet(
+    key: K,
+    value: V,
+    options?: CacheSetOptions,
+  ): Promise<void> {
     let entry = await this.store.get(key);
 
     const ttl = options?.ttl ?? this.options.ttl;
@@ -176,6 +230,7 @@ export class MemoryCache<K, V> implements StatisticsAwareCache<K, V> {
         updatedAt: now,
         accessedAt: now,
         expiresAt,
+        ttl,
       };
 
       this.policy.onSet(key);
@@ -184,8 +239,6 @@ export class MemoryCache<K, V> implements StatisticsAwareCache<K, V> {
 
       this.stats.writes++;
 
-      await this.runPlugins((plugin) => plugin.afterSet?.(key, value));
-
       return;
     }
 
@@ -193,7 +246,7 @@ export class MemoryCache<K, V> implements StatisticsAwareCache<K, V> {
       const victim = this.policy.evict();
 
       if (victim !== undefined) {
-        const deleted = await this.delete(victim);
+        const deleted = await this.doDelete(victim);
 
         if (deleted) {
           this.stats.evictions++;
@@ -208,6 +261,7 @@ export class MemoryCache<K, V> implements StatisticsAwareCache<K, V> {
       accessedAt: now,
       accessCount: 0,
       expiresAt,
+      ttl,
     };
 
     await this.store.set(key, entry);
@@ -215,19 +269,26 @@ export class MemoryCache<K, V> implements StatisticsAwareCache<K, V> {
     this.stats.writes++;
 
     this.policy.onSet(key);
-
-    await this.runPlugins((plugin) => plugin.afterSet?.(key, value));
   }
 
-  async delete(key: K): Promise<boolean> {
-    await this.runPlugins((plugin) => plugin.beforeDelete?.(key));
-
+  private async doDelete(key: K): Promise<boolean> {
     this.policy.onDelete(key);
 
     const deleted = await this.store.delete(key);
 
     if (deleted) {
       this.stats.deletes++;
+    }
+
+    return deleted;
+  }
+
+  async delete(key: K): Promise<boolean> {
+    await this.runPlugins((plugin) => plugin.beforeDelete?.(key));
+
+    const deleted = await this.writeLock(() => this.doDelete(key));
+
+    if (deleted) {
       await this.runPlugins((plugin) => plugin.afterDelete?.(key));
     }
 
@@ -278,12 +339,15 @@ export class MemoryCache<K, V> implements StatisticsAwareCache<K, V> {
     return Promise.resolve(Object.freeze({ ...this.stats }));
   }
 
-  async resetStatistics(): Promise<void> {
+  resetStatistics(): Promise<void> {
     this.stats.hits = 0;
     this.stats.misses = 0;
     this.stats.writes = 0;
     this.stats.deletes = 0;
     this.stats.evictions = 0;
     this.stats.expirations = 0;
+    this.stats.errors = 0;
+
+    return Promise.resolve();
   }
 }

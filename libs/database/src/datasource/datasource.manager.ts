@@ -40,6 +40,8 @@ export class DataSourceManager implements OnApplicationShutdown {
 
   private nextReaderIndex = 0;
 
+  private readerFallbackCount = 0;
+
   constructor(
     @Inject(DATABASE_MODULE_OPTIONS)
     private readonly options: ResolvedDatabaseOptions,
@@ -273,6 +275,10 @@ export class DataSourceManager implements OnApplicationShutdown {
     );
   }
 
+  getReaderFallbackCount(): number {
+    return this.readerFallbackCount;
+  }
+
   private selectReader(): DataSourceState {
     if (this.readers.length === 0) {
       return this.writer;
@@ -290,6 +296,11 @@ export class DataSourceManager implements OnApplicationShutdown {
         return candidate;
       }
     }
+
+    this.readerFallbackCount++;
+    this.logger.warn(
+      `No healthy reader available; falling back to the writer for a read (fallback count: ${this.readerFallbackCount}).`,
+    );
 
     return this.writer;
   }
@@ -323,12 +334,28 @@ export class DataSourceManager implements OnApplicationShutdown {
 
       healthy: false,
 
+      dataSource: undefined,
+
+      reconnectPromise: undefined,
+
       metrics: {
         healthCheckFailures: 0,
         reconnectCount: 0,
         successfulConnections: 0,
         consecutiveHealthCheckFailures: 0,
         failedConnections: 0,
+        lastReconnectAttemptAt: undefined,
+        latencyMs: undefined,
+        lastConnectedAt: undefined,
+        lastDisconnectedAt: undefined,
+        lastHealthCheckAt: undefined,
+        lastFailureAt: undefined,
+        lastError: undefined,
+        serverUuid: undefined,
+        hostname: undefined,
+        readOnly: undefined,
+        lastServerChangeAt: undefined,
+        lastRoleChangeAt: undefined,
       },
     };
   }

@@ -59,6 +59,8 @@ export interface CacheModuleOptions {
   plugins?: readonly CachePlugin<string, unknown>[];
 
   pluginErrorHandler?: CachePluginErrorHandler;
+
+  registerInterceptor?: boolean;
 }
 
 export interface CacheModuleAsyncOptions extends Pick<
@@ -70,4 +72,6 @@ export interface CacheModuleAsyncOptions extends Pick<
   useFactory: (
     ...args: readonly unknown[]
   ) => CacheModuleOptions | Promise<CacheModuleOptions>;
+
+  registerInterceptor?: boolean;
 }

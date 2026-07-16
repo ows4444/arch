@@ -1,3 +1,5 @@
+import { Logger } from '@nestjs/common';
+
 export interface CachePlugin<K, V> {
   beforeGet?(key: K): Promise<void> | void;
 
@@ -23,9 +25,11 @@ export const defaultPluginErrorHandler: CachePluginErrorHandler = (
   error,
   plugin,
 ) => {
-  console.error(
-    '[Cache] Plugin execution failed.',
-    error,
-    plugin.constructor.name,
+  const message = error instanceof Error ? error.message : String(error);
+
+  Logger.error(
+    `Plugin '${plugin.constructor.name}' execution failed: ${message}`,
+    error instanceof Error ? error.stack : undefined,
+    'Cache',
   );
 };

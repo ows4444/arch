@@ -32,7 +32,7 @@ export class DatabaseHealthService {
   }
 
   reader() {
-    return this.manager.readerState() ?? this.manager.writerState();
+    return this.manager.state(DatabaseRole.READ);
   }
 
   reconnectWriter(): Promise<void> {

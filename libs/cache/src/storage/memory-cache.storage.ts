@@ -3,39 +3,41 @@ import { CacheStorage } from '../core/cache-storage.interface';
 export class MemoryCacheStorage<K, V> implements CacheStorage<K, V> {
   private readonly storage = new Map<K, V>();
 
-  async get(key: K): Promise<V | undefined> {
-    return this.storage.get(key);
+  get(key: K): Promise<V | undefined> {
+    return Promise.resolve(this.storage.get(key));
   }
 
-  async set(key: K, value: V): Promise<void> {
+  set(key: K, value: V): Promise<void> {
     this.storage.set(key, value);
+    return Promise.resolve();
   }
 
-  async delete(key: K): Promise<boolean> {
-    return this.storage.delete(key);
+  delete(key: K): Promise<boolean> {
+    return Promise.resolve(this.storage.delete(key));
   }
 
-  async has(key: K): Promise<boolean> {
-    return this.storage.has(key);
+  has(key: K): Promise<boolean> {
+    return Promise.resolve(this.storage.has(key));
   }
 
-  async clear(): Promise<void> {
+  clear(): Promise<void> {
     this.storage.clear();
+    return Promise.resolve();
   }
 
-  async size(): Promise<number> {
-    return this.storage.size;
+  size(): Promise<number> {
+    return Promise.resolve(this.storage.size);
   }
 
-  async keys(): Promise<readonly K[]> {
-    return [...this.storage.keys()];
+  keys(): Promise<readonly K[]> {
+    return Promise.resolve([...this.storage.keys()]);
   }
 
-  async values(): Promise<readonly V[]> {
-    return [...this.storage.values()];
+  values(): Promise<readonly V[]> {
+    return Promise.resolve([...this.storage.values()]);
   }
 
-  async entries(): Promise<readonly (readonly [K, V])[]> {
-    return [...this.storage.entries()];
+  entries(): Promise<readonly (readonly [K, V])[]> {
+    return Promise.resolve([...this.storage.entries()]);
   }
 }

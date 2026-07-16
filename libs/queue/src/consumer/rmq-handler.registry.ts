@@ -76,7 +76,7 @@ export class RMQHandlerRegistry implements OnModuleInit {
 
         this.handlers.push({
           options: metadata,
-          invoke: typedRef.bind(instance) as RMQHandler,
+          invoke: typedRef.bind(instance),
         });
       }
     }

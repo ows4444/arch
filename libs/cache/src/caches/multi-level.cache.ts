@@ -30,6 +30,7 @@ export class MultiLevelCache<K, V> implements StatisticsAwareCache<K, V> {
       deletes: (l1?.deletes ?? 0) + (l2?.deletes ?? 0),
       evictions: (l1?.evictions ?? 0) + (l2?.evictions ?? 0),
       expirations: (l1?.expirations ?? 0) + (l2?.expirations ?? 0),
+      errors: (l1?.errors ?? 0) + (l2?.errors ?? 0),
     };
   }
 
@@ -111,7 +112,21 @@ export class MultiLevelCache<K, V> implements StatisticsAwareCache<K, V> {
   }
 
   async clear(): Promise<void> {
-    await Promise.all([this.l1.clear(), this.l2.clear()]);
+    const results = await Promise.allSettled([
+      this.l1.clear(),
+      this.l2.clear(),
+    ]);
+
+    const failures = results.filter(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
+
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures.map((failure): unknown => failure.reason),
+        'Failed to clear one or more cache levels.',
+      );
+    }
   }
 
   async has(key: K): Promise<boolean> {

@@ -23,6 +23,7 @@ import { isDatabaseConnectivityError } from '../utils/database-error.util';
 import { RepositoryResolver } from './repository-resolver';
 import { OffsetPaginationResult } from '../pagination/pagination.types';
 import { paginateOffset } from '../pagination/pagination.util';
+import { transactionContext } from '../transaction/transaction.context';
 
 export type DatabaseLockMode =
   | 'dirty_read'
@@ -71,17 +72,24 @@ export abstract class BaseRepository<TEntity extends ObjectLiteral> {
 
   private static readonly RECOVERY_TIMEOUT_MS = 2_000;
 
-  protected runRead<T>(operation: () => Promise<T>): Promise<T> {
-    return this.execute(operation, true);
+  protected runRead<T>(
+    operation: () => Promise<T>,
+    explicitManager?: EntityManager,
+  ): Promise<T> {
+    return this.execute(operation, true, explicitManager);
   }
 
-  protected runWrite<T>(operation: () => Promise<T>): Promise<T> {
-    return this.execute(operation, false);
+  protected runWrite<T>(
+    operation: () => Promise<T>,
+    explicitManager?: EntityManager,
+  ): Promise<T> {
+    return this.execute(operation, false, explicitManager);
   }
 
   private async execute<T>(
     operation: () => Promise<T>,
     retryOnFailure: boolean,
+    explicitManager?: EntityManager,
   ): Promise<T> {
     try {
       return await operation();
@@ -95,6 +103,14 @@ export abstract class BaseRepository<TEntity extends ObjectLiteral> {
       if (!retryOnFailure) {
         throw new ServiceUnavailableException(
           'Database connectivity was lost during a write operation. The operation may or may not have been committed. Retry only if the operation is idempotent.',
+        );
+      }
+
+      if (explicitManager) {
+        throw new ServiceUnavailableException(
+          'Database connectivity was lost while using an explicitly supplied EntityManager. ' +
+            'That manager cannot be swapped for a recovered connection automatically — ' +
+            'retry with a fresh manager (or without one) instead.',
         );
       }
 
@@ -160,27 +176,45 @@ export abstract class BaseRepository<TEntity extends ObjectLiteral> {
   }
 
   find(options?: FindManyOptions<TEntity>, manager?: EntityManager) {
-    return this.runRead(() => this.getRepository(manager).find(options));
+    return this.runRead(
+      () => this.getRepository(manager).find(options),
+      manager,
+    );
   }
 
   findOne(options: FindOneOptions<TEntity>, manager?: EntityManager) {
-    return this.runRead(() => this.getRepository(manager).findOne(options));
+    return this.runRead(
+      () => this.getRepository(manager).findOne(options),
+      manager,
+    );
   }
 
   findOneBy(where: FindOptionsWhere<TEntity>, manager?: EntityManager) {
-    return this.runRead(() => this.getRepository(manager).findOneBy(where));
+    return this.runRead(
+      () => this.getRepository(manager).findOneBy(where),
+      manager,
+    );
   }
 
   findBy(where: FindOptionsWhere<TEntity>, manager?: EntityManager) {
-    return this.runRead(() => this.getRepository(manager).findBy(where));
+    return this.runRead(
+      () => this.getRepository(manager).findBy(where),
+      manager,
+    );
   }
 
   existsBy(where: FindOptionsWhere<TEntity>, manager?: EntityManager) {
-    return this.runRead(() => this.getRepository(manager).existsBy(where));
+    return this.runRead(
+      () => this.getRepository(manager).existsBy(where),
+      manager,
+    );
   }
 
   count(options?: FindManyOptions<TEntity>, manager?: EntityManager) {
-    return this.runRead(() => this.getRepository(manager).count(options));
+    return this.runRead(
+      () => this.getRepository(manager).count(options),
+      manager,
+    );
   }
 
   delete(
@@ -276,7 +310,10 @@ export abstract class BaseRepository<TEntity extends ObjectLiteral> {
     entity: DeepPartial<TEntity>,
     manager?: EntityManager,
   ): Promise<TEntity | undefined> {
-    return this.runRead(() => this.getRepository(manager).preload(entity));
+    return this.runRead(
+      () => this.getRepository(manager).preload(entity),
+      manager,
+    );
   }
 
   hasId(entity: TEntity, manager?: EntityManager): boolean {
@@ -287,10 +324,21 @@ export abstract class BaseRepository<TEntity extends ObjectLiteral> {
     return this.getRepository(manager).getId(entity);
   }
 
-  protected findOneForUpdate(
+  private assertActiveWriteTransaction(caller: string): void {
+    if (this.role !== DatabaseRole.WRITE || !transactionContext.active) {
+      throw new Error(
+        `${caller}() requires an active transaction (call it on a WRITE-role repository inside @Transactional()); ` +
+          'otherwise the pessimistic lock is acquired and released before this method returns, providing no protection.',
+      );
+    }
+  }
+
+  protected async findOneForUpdate(
     alias: string,
     where: FindOptionsWhere<TEntity>,
   ): Promise<TEntity | null> {
+    this.assertActiveWriteTransaction('findOneForUpdate');
+
     return this.runRead(() =>
       this.createLockedQueryBuilder(alias, 'pessimistic_write')
         .where(where)
@@ -298,10 +346,12 @@ export abstract class BaseRepository<TEntity extends ObjectLiteral> {
     );
   }
 
-  protected findOneForShare(
+  protected async findOneForShare(
     alias: string,
     where: FindOptionsWhere<TEntity>,
   ): Promise<TEntity | null> {
+    this.assertActiveWriteTransaction('findOneForShare');
+
     return this.runRead(() =>
       this.createLockedQueryBuilder(alias, 'pessimistic_read')
         .where(where)
@@ -320,8 +370,9 @@ export abstract class BaseRepository<TEntity extends ObjectLiteral> {
   }
 
   findOneOrFail(options: FindOneOptions<TEntity>, manager?: EntityManager) {
-    return this.runRead(() =>
-      this.getRepository(manager).findOneOrFail(options),
+    return this.runRead(
+      () => this.getRepository(manager).findOneOrFail(options),
+      manager,
     );
   }
 
@@ -329,8 +380,9 @@ export abstract class BaseRepository<TEntity extends ObjectLiteral> {
     options?: FindManyOptions<TEntity>,
     manager?: EntityManager,
   ): Promise<[TEntity[], number]> {
-    return this.runRead(() =>
-      this.getRepository(manager).findAndCount(options),
+    return this.runRead(
+      () => this.getRepository(manager).findAndCount(options),
+      manager,
     );
   }
 
@@ -338,7 +390,10 @@ export abstract class BaseRepository<TEntity extends ObjectLiteral> {
     options?: FindManyOptions<TEntity>,
     manager?: EntityManager,
   ): Promise<boolean> {
-    return this.runRead(() => this.getRepository(manager).exists(options));
+    return this.runRead(
+      () => this.getRepository(manager).exists(options),
+      manager,
+    );
   }
 
   insertMany(
@@ -368,9 +423,6 @@ export abstract class BaseRepository<TEntity extends ObjectLiteral> {
     await this.softDelete(where);
   }
 
-  /**
-   * Get the physical table name for this entity.
-   */
   get tableName(): string {
     return this.repository.metadata.tableName;
   }

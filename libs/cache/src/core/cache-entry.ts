@@ -11,6 +11,8 @@ export interface CacheEntry<V> {
 
   expiresAt?: number | undefined;
 
+  ttl?: number | undefined;
+
   size?: number | undefined;
 
   metadata?: Record<string, unknown> | undefined;

@@ -13,6 +13,7 @@ export class DatabaseModule {
       imports: [ConfigModule, DatabaseConfigModule],
       useClass: DefaultDatabaseOptionsFactory,
       entities: options.entities,
+      migrations: options.migrations,
     });
   }
 

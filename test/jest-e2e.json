@@ -13,6 +13,7 @@
   "moduleNameMapper": {
     "^@/cashe(|/.*)$": "<rootDir>/../libs/cashe/src/$1",
     "^@/database(|/.*)$": "<rootDir>/../libs/database/src/$1",
-    "^@/queue(|/.*)$": "<rootDir>/../libs/queue/src/$1"
+    "^@/queue(|/.*)$": "<rootDir>/../libs/queue/src/$1",
+    "^@/workflow(|/.*)$": "<rootDir>/../libs/workflow/src/$1"
   }
 }

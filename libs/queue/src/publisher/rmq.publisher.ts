@@ -5,13 +5,12 @@ import { ClassConstructor } from 'class-transformer';
 import { RMQConnection } from '../connection/rmq.connection';
 import { RMQPayloadValidator } from '../consumer/rmq-payload-validator';
 import { RMQHeaderValidator } from '../context/rmq-header.validator';
+import { UnroutableMessageError } from '../errors/unroutable-message.error';
 import { RMQ_HEADERS } from '../queue.constants';
+import type { RMQQueueRef } from '../queue.types';
 import { RMQSerializer } from './serializer';
 
-interface PublishTarget {
-  EXCHANGE_NAME: string;
-  ROUTING_KEY: string;
-}
+type PublishTarget = Pick<RMQQueueRef, 'EXCHANGE_NAME' | 'ROUTING_KEY'>;
 
 @Injectable()
 export class RMQPublisher {
@@ -19,15 +18,21 @@ export class RMQPublisher {
 
   private readonly channel: ChannelWrapper;
 
+  private readonly returnedMessageIds = new Set<string>();
+
   constructor(connection: RMQConnection) {
     this.channel = connection.createChannel('publisher');
 
     this.channel.on('return', (message: Message) => {
+      const messageId = String(message.properties.messageId);
+
+      this.returnedMessageIds.add(messageId);
+
       this.logger.error({
         message: 'RabbitMQ message unroutable',
         exchange: message.fields.exchange,
         routingKey: message.fields.routingKey,
-        messageId: String(message.properties.messageId),
+        messageId,
       });
     });
   }
@@ -38,8 +43,9 @@ export class RMQPublisher {
     params: {
       messageId: string;
       requestId: string;
-      correlationId?: string;
-      causationId?: string;
+      correlationId?: string | undefined;
+      causationId?: string | undefined;
+      retryCount?: number;
       options?: Options.Publish;
       payloadType?: ClassConstructor<T>;
     },
@@ -62,12 +68,16 @@ export class RMQPublisher {
 
     const publishOptions: Options.Publish = params.options ?? {};
 
-    const extraHeaders =
+    const rawExtraHeaders =
       publishOptions.headers !== null &&
       typeof publishOptions.headers === 'object' &&
       !Array.isArray(publishOptions.headers)
         ? (publishOptions.headers as Record<string, unknown>)
         : undefined;
+
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { [RMQ_HEADERS.RETRY_COUNT]: _ignoredRetryCount, ...extraHeaders } =
+      rawExtraHeaders ?? {};
 
     const messageId = params.messageId;
 
@@ -88,7 +98,18 @@ export class RMQPublisher {
         ...(params.causationId && {
           [RMQ_HEADERS.CAUSATION_ID]: params.causationId,
         }),
+        ...(params.retryCount !== undefined && {
+          [RMQ_HEADERS.RETRY_COUNT]: params.retryCount,
+        }),
       },
     });
+
+    if (this.returnedMessageIds.delete(messageId)) {
+      throw new UnroutableMessageError({
+        exchange: target.EXCHANGE_NAME,
+        routingKey: target.ROUTING_KEY,
+        messageId,
+      });
+    }
   }
 }

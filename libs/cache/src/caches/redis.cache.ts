@@ -47,6 +47,7 @@ export class RedisCacheStore<V> implements StatisticsAwareCache<string, V> {
     deletes: 0,
     evictions: 0,
     expirations: 0,
+    errors: 0,
   };
 
   private async runPlugins(
@@ -97,7 +98,7 @@ export class RedisCacheStore<V> implements StatisticsAwareCache<string, V> {
 
     const deserialized = this.serializer.deserialize<V>(value);
     if (deserialized === undefined) {
-      this.stats.misses++;
+      this.stats.errors++;
 
       await this.runPlugins((plugin) => plugin.afterGet?.(key, undefined));
 
@@ -110,10 +111,11 @@ export class RedisCacheStore<V> implements StatisticsAwareCache<string, V> {
 
   async set(key: string, value: V, options?: CacheSetOptions): Promise<void> {
     await this.runPlugins((plugin) => plugin.beforeSet?.(key, value));
+    const ttlMs = options?.ttl ?? this.ttl;
     await this.client.set(
       this.key(key),
       this.serializer.serialize(value),
-      options?.ttl ?? this.ttl,
+      ttlMs === undefined ? undefined : Math.ceil(ttlMs / 1000),
     );
     this.stats.writes++;
     await this.runPlugins((plugin) => plugin.afterSet?.(key, value));
@@ -133,38 +135,51 @@ export class RedisCacheStore<V> implements StatisticsAwareCache<string, V> {
     return Boolean(await this.client.exists(this.key(key)));
   }
 
-  async clear(): Promise<void> {
-    throw new Error(
-      'Redis cache cannot clear all keys. Use a namespaced Redis client implementation.',
+  clear(): Promise<void> {
+    return Promise.reject(
+      new Error(
+        'Redis cache cannot clear all keys. Use a namespaced Redis client implementation.',
+      ),
     );
   }
 
-  async size(): Promise<number> {
-    throw new Error('Redis does not efficiently support cache size.');
+  size(): Promise<number> {
+    return Promise.reject(
+      new Error('Redis does not efficiently support cache size.'),
+    );
   }
 
-  async keys(): Promise<readonly string[]> {
-    throw new Error('Redis cache does not support enumerating keys.');
+  keys(): Promise<readonly string[]> {
+    return Promise.reject(
+      new Error('Redis cache does not support enumerating keys.'),
+    );
   }
 
-  async values(): Promise<readonly V[]> {
-    throw new Error('Redis cache does not support enumerating values.');
+  values(): Promise<readonly V[]> {
+    return Promise.reject(
+      new Error('Redis cache does not support enumerating values.'),
+    );
   }
 
-  async entries(): Promise<readonly (readonly [string, V])[]> {
-    throw new Error('Redis cache does not support enumerating entries.');
+  entries(): Promise<readonly (readonly [string, V])[]> {
+    return Promise.reject(
+      new Error('Redis cache does not support enumerating entries.'),
+    );
   }
 
-  async statistics(): Promise<Readonly<CacheStatistics>> {
-    return { ...this.stats };
+  statistics(): Promise<Readonly<CacheStatistics>> {
+    return Promise.resolve({ ...this.stats });
   }
 
-  async resetStatistics(): Promise<void> {
+  resetStatistics(): Promise<void> {
     this.stats.hits = 0;
     this.stats.misses = 0;
     this.stats.writes = 0;
     this.stats.deletes = 0;
     this.stats.evictions = 0;
     this.stats.expirations = 0;
+    this.stats.errors = 0;
+
+    return Promise.resolve();
   }
 }

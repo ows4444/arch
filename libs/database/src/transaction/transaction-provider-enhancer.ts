@@ -28,6 +28,7 @@ export class TransactionProviderEnhancer implements OnModuleInit {
       const instance = wrapper.instance as Record<string, unknown> | undefined;
 
       if (!instance) {
+        this.warnIfDecoratedWithoutInstance(wrapper);
         continue;
       }
 
@@ -35,6 +36,41 @@ export class TransactionProviderEnhancer implements OnModuleInit {
 
       for (const methodName of this.scanner.getAllMethodNames(prototype)) {
         this.wrapMethod(instance, prototype, methodName);
+      }
+    }
+  }
+
+  private warnIfDecoratedWithoutInstance(
+    wrapper: ReturnType<DiscoveryService['getProviders']>[number],
+  ): void {
+    const metatype = wrapper.metatype;
+
+    if (typeof metatype !== 'function') {
+      return;
+    }
+
+    const prototype = (metatype as { prototype?: object }).prototype;
+
+    if (!prototype) {
+      return;
+    }
+
+    for (const methodName of this.scanner.getAllMethodNames(prototype)) {
+      const original = (prototype as Record<string, unknown>)[methodName];
+
+      if (typeof original !== 'function') {
+        continue;
+      }
+
+      const metadata = this.reflector.getAllAndOverride<TransactionMetadata>(
+        TRANSACTION_METADATA,
+        [original, metatype],
+      );
+
+      if (metadata) {
+        this.logger.warn(
+          `${metatype.name}.${methodName}() is decorated with @Transactional() but has no singleton instance at module-init time (likely REQUEST- or TRANSIENT-scoped) — @Transactional() only patches singleton instances, so this method will run WITHOUT transaction propagation/rollback semantics.`,
+        );
       }
     }
   }

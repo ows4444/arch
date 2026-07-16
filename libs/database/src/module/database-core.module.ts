@@ -64,15 +64,15 @@ export class DatabaseCoreModule {
     return [
       {
         provide: getDatabaseAccessorToken(DatabaseRole.READ),
-        inject: [DataSourceManager],
-        useFactory: (manager: DataSourceManager) =>
-          new DatabaseAccessor(DatabaseRole.READ, manager),
+        inject: [RepositoryResolver],
+        useFactory: (resolver: RepositoryResolver) =>
+          new DatabaseAccessor(DatabaseRole.READ, resolver),
       },
       {
         provide: getDatabaseAccessorToken(DatabaseRole.WRITE),
-        inject: [DataSourceManager],
-        useFactory: (manager: DataSourceManager) =>
-          new DatabaseAccessor(DatabaseRole.WRITE, manager),
+        inject: [RepositoryResolver],
+        useFactory: (resolver: RepositoryResolver) =>
+          new DatabaseAccessor(DatabaseRole.WRITE, resolver),
       },
     ];
   }
@@ -107,6 +107,7 @@ export class DatabaseCoreModule {
           provide: DATABASE_BOOTSTRAP_OPTIONS,
           useValue: {
             entities: options.entities,
+            migrations: options.migrations,
           },
         },
 
