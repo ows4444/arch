@@ -1,9 +1,4 @@
-import {
-  Inject,
-  Injectable,
-  Logger,
-  OnApplicationShutdown,
-} from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import amqpConnectionManager, {
   type AmqpConnectionManager,
   type ChannelWrapper,
@@ -14,7 +9,7 @@ import { RMQ_DEFAULT_PREFETCH, RMQ_MODULE_OPTIONS } from '../queue.constants';
 import type { QueueModuleOptions } from '../queue.types';
 
 @Injectable()
-export class RMQConnection implements OnApplicationShutdown {
+export class RMQConnection {
   private static readonly DEFAULT_CONNECTION_NAME = 'nestjs-rmq';
 
   private static readonly RAW_CONNECT_MAX_RETRIES = 10;
@@ -176,7 +171,16 @@ export class RMQConnection implements OnApplicationShutdown {
     });
   }
 
-  async onApplicationShutdown(): Promise<void> {
+  /**
+   * Closes the shared AMQP connection (and the raw topology connection, if
+   * ever opened). Deliberately not an `OnApplicationShutdown` hook: Nest runs
+   * every provider's shutdown hook within a module concurrently via
+   * `Promise.all`, so there is no ordering guarantee relative to
+   * `RMQConsumerRuntime`'s drain sequence. Callers that depend on this
+   * connection (currently `RMQConsumerRuntime`) must call `close()`
+   * themselves once they've finished using it.
+   */
+  async close(): Promise<void> {
     const rawConnection = await this.rawConnectionPromise?.catch(
       () => undefined,
     );

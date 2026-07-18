@@ -36,10 +36,14 @@ export class OutboxDispatcherService implements OnModuleInit, OnModuleDestroy {
     private readonly scheduler: SchedulerRegistry,
 
     @Inject(QUEUE_OUTBOX_OPTIONS)
-    private readonly options: QueueOutboxOptions,
+    private readonly options: QueueOutboxOptions | undefined,
   ) {}
 
   onModuleInit(): void {
+    if (!this.options) {
+      return;
+    }
+
     const interval = this.options.intervalMs ?? DEFAULT_INTERVAL_MS;
 
     const timer = setInterval(() => {
@@ -64,9 +68,13 @@ export class OutboxDispatcherService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private get outboxOptions(): QueueOutboxOptions {
+    return this.options ?? {};
+  }
+
   async sweep(): Promise<void> {
-    const batchSize = this.options.batchSize ?? DEFAULT_BATCH_SIZE;
-    const leaseMs = this.options.leaseMs ?? DEFAULT_LEASE_MS;
+    const batchSize = this.outboxOptions.batchSize ?? DEFAULT_BATCH_SIZE;
+    const leaseMs = this.outboxOptions.leaseMs ?? DEFAULT_LEASE_MS;
 
     const claimed = await this.outbox.claimBatch(
       this.ownerId,
@@ -106,7 +114,7 @@ export class OutboxDispatcherService implements OnModuleInit, OnModuleDestroy {
     error: unknown,
   ): Promise<void> {
     const attempts = row.attempts + 1;
-    const maxAttempts = this.options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
+    const maxAttempts = this.outboxOptions.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
     const exhausted = attempts >= maxAttempts;
 
     this.logger.error(
@@ -126,9 +134,13 @@ export class OutboxDispatcherService implements OnModuleInit, OnModuleDestroy {
       },
     );
 
-    if (exhausted && this.options.onExhausted) {
+    if (exhausted && this.outboxOptions.onExhausted) {
       try {
-        await this.options.onExhausted({ ...row, attempts, status: 'failed' });
+        await this.outboxOptions.onExhausted({
+          ...row,
+          attempts,
+          status: 'failed',
+        });
       } catch (hookError) {
         this.logger.error(
           `onExhausted hook failed for message '${row.messageId}'`,
@@ -139,8 +151,8 @@ export class OutboxDispatcherService implements OnModuleInit, OnModuleDestroy {
   }
 
   private computeBackoff(attempt: number): Date {
-    const baseMs = this.options.retryBaseMs ?? DEFAULT_RETRY_BASE_MS;
-    const maxMs = this.options.retryMaxMs ?? DEFAULT_RETRY_MAX_MS;
+    const baseMs = this.outboxOptions.retryBaseMs ?? DEFAULT_RETRY_BASE_MS;
+    const maxMs = this.outboxOptions.retryMaxMs ?? DEFAULT_RETRY_MAX_MS;
     const delay = Math.min(baseMs * 2 ** (attempt - 1), maxMs);
     const jitter = Math.floor(delay * 0.2 * Math.random());
 

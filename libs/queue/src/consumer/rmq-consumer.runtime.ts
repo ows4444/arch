@@ -164,6 +164,8 @@ export class RMQConsumerRuntime implements OnModuleInit, OnApplicationShutdown {
       await this.withTimeout({
         promise: handlerPromise,
         controller: abortController,
+        timeoutMs:
+          handler.options.timeoutMs ?? RMQConsumerRuntime.HANDLER_TIMEOUT_MS,
       });
 
       outcome = 'handled';
@@ -315,6 +317,13 @@ export class RMQConsumerRuntime implements OnModuleInit, OnApplicationShutdown {
     await Promise.allSettled(
       this.consumers.map(({ wrapper }) => wrapper.close()),
     );
+
+    // Close the shared connection only after every consumer has been
+    // cancelled and drained — Nest doesn't order OnApplicationShutdown hooks
+    // across sibling providers (they all fire concurrently), so closing it
+    // here (rather than from RMQConnection's own shutdown hook) is what
+    // guarantees in-flight ack/nack calls above complete on a live channel.
+    await this.connection.close();
 
     this.logger.log({
       message: 'RabbitMQ consumers shutdown complete',
@@ -524,8 +533,9 @@ export class RMQConsumerRuntime implements OnModuleInit, OnApplicationShutdown {
   private async withTimeout<T>(params: {
     promise: Promise<T>;
     controller: AbortController;
+    timeoutMs: number;
   }): Promise<T> {
-    const { promise, controller } = params;
+    const { promise, controller, timeoutMs } = params;
 
     void promise.catch(() => undefined);
 
@@ -534,8 +544,8 @@ export class RMQConsumerRuntime implements OnModuleInit, OnApplicationShutdown {
     const timeoutPromise = new Promise<never>((_, reject) => {
       timeout = setTimeout(() => {
         controller.abort();
-        reject(new HandlerTimeoutError(RMQConsumerRuntime.HANDLER_TIMEOUT_MS));
-      }, RMQConsumerRuntime.HANDLER_TIMEOUT_MS).unref();
+        reject(new HandlerTimeoutError(timeoutMs));
+      }, timeoutMs).unref();
     });
 
     try {

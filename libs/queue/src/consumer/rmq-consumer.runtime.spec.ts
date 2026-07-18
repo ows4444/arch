@@ -281,4 +281,80 @@ describe('RMQConsumerRuntime message settlement', () => {
       jest.useRealTimers();
     }
   });
+
+  it('honors a per-consumer timeoutMs override instead of the 60s default', async () => {
+    jest.useFakeTimers();
+
+    try {
+      const channel = fakeChannel();
+      const publisher = fakePublisher();
+      const runtime = buildRuntime(publisher);
+
+      const handler = fakeHandler(() => new Promise<void>(() => undefined), {
+        timeoutMs: 1_000,
+      });
+
+      const consumePromise = (
+        runtime as unknown as RuntimeWithPrivateAccess
+      ).consumeMessage({
+        channel,
+        message: fakeMessage(),
+        handler,
+      });
+
+      await jest.advanceTimersByTimeAsync(1_000);
+      await consumePromise;
+
+      expect(channel.nack).toHaveBeenCalledWith(
+        expect.anything(),
+        false,
+        false,
+      );
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});
+
+describe('RMQConsumerRuntime.onApplicationShutdown', () => {
+  it('closes the shared connection only after consumers are cancelled and drained', async () => {
+    const callOrder: string[] = [];
+
+    const consumerWrapper = {
+      cancel: jest.fn().mockImplementation(() => {
+        callOrder.push('cancel');
+        return Promise.resolve();
+      }),
+      close: jest.fn().mockImplementation(() => {
+        callOrder.push('wrapper-close');
+        return Promise.resolve();
+      }),
+    };
+
+    const connection = {
+      close: jest.fn().mockImplementation(() => {
+        callOrder.push('connection-close');
+        return Promise.resolve();
+      }),
+    } as unknown as RMQConnection;
+
+    const runtime = new RMQConsumerRuntime(
+      connection,
+      {} as RMQHandlerRegistry,
+      new RMQContextFactory(),
+      {} as TopologyBootstrap,
+      fakePublisher(),
+      passthroughInbox,
+    );
+
+    (
+      runtime as unknown as {
+        consumers: { wrapper: typeof consumerWrapper; consumerTag?: string }[];
+      }
+    ).consumers.push({ wrapper: consumerWrapper, consumerTag: 'tag-1' });
+
+    await runtime.onApplicationShutdown();
+
+    expect(callOrder).toEqual(['cancel', 'wrapper-close', 'connection-close']);
+  });
 });

@@ -21,3 +21,13 @@ export const RMQ_HEADERS = {
 
   RETRY_COUNT: 'x-retry-count',
 } as const;
+
+/**
+ * Internal-only header used to correlate a broker `basic.return` event back
+ * to the exact `RMQPublisher.publish()` call that produced it. Deliberately
+ * not part of `RMQ_HEADERS`/exposed to consumers — it exists only so
+ * unroutable-message detection doesn't key on the caller-supplied AMQP
+ * `messageId`, which retries and outbox redelivery legitimately reuse across
+ * multiple `publish()` calls for the same logical message.
+ */
+export const RMQ_INTERNAL_PUBLISH_ID_HEADER = 'x-queue-internal-publish-id';

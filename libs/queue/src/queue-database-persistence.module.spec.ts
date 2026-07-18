@@ -42,6 +42,7 @@ describe('QueueModule outbox/inbox wiring (against a real DatabaseModule)', () =
       .useValue({
         createChannel: () => ({ on: () => undefined }),
         resolvePrefetch: () => 10,
+        close: () => Promise.resolve(),
       })
       .overrideProvider(TopologyBootstrap)
       .useValue({ waitUntilReady: () => Promise.resolve() })

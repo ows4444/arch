@@ -44,6 +44,35 @@ function setup(
   return { service, outbox, publisher, scheduler };
 }
 
+describe('OutboxDispatcherService.onModuleInit', () => {
+  it('schedules the sweep interval when outbox options are configured', () => {
+    const { service, scheduler } = setup();
+
+    service.onModuleInit();
+
+    expect(scheduler.addInterval).toHaveBeenCalledWith(
+      'queue-outbox-dispatch',
+      expect.anything(),
+    );
+  });
+
+  it('does not schedule anything when outbox is disabled (options undefined)', () => {
+    const outbox = { claimBatch: jest.fn(), update: jest.fn() };
+    const publisher = { publish: jest.fn() };
+    const scheduler = { addInterval: jest.fn(), deleteInterval: jest.fn() };
+    const service = new OutboxDispatcherService(
+      outbox as never,
+      publisher as never,
+      scheduler as never,
+      undefined,
+    );
+
+    service.onModuleInit();
+
+    expect(scheduler.addInterval).not.toHaveBeenCalled();
+  });
+});
+
 describe('OutboxDispatcherService.sweep', () => {
   it('publishes each claimed row and marks it published on success', async () => {
     const { service, outbox, publisher } = setup();

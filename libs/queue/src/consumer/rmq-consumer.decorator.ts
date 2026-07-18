@@ -5,6 +5,7 @@ import type { RMQQueueRef, RmqConsumerOptions } from '../queue.types';
 interface ConsumerDecoratorOptions {
   payload?: RmqConsumerOptions['payloadType'];
   prefetch?: number;
+  timeoutMs?: number;
 }
 
 interface QueueContract extends RMQQueueRef {
@@ -21,5 +22,6 @@ export const RMQConsumer = (
     routingKey: queue.ROUTING_KEY,
     ...(options.payload && { payloadType: options.payload }),
     ...(options.prefetch !== undefined && { prefetch: options.prefetch }),
+    ...(options.timeoutMs !== undefined && { timeoutMs: options.timeoutMs }),
     ...(queue.RETRY_POLICY && { retryPolicy: queue.RETRY_POLICY }),
   } satisfies RmqConsumerOptions);

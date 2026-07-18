@@ -4,6 +4,12 @@ interface QueryDriverError {
   code?: string;
 }
 
+/**
+ * Postgres/SQLite codes are handled alongside MySQL's `ER_DUP_ENTRY` because
+ * `testing/queue-test-datasource.ts` runs the same repository code against
+ * an in-memory SQLite datasource in unit tests; production only ever uses
+ * MySQL.
+ */
 export function isDuplicateKeyError(error: unknown): boolean {
   if (!(error instanceof QueryFailedError)) {
     return false;

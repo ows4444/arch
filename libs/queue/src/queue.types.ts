@@ -1,3 +1,9 @@
+import type {
+  InjectionToken,
+  ModuleMetadata,
+  OptionalFactoryDependency,
+  Type,
+} from '@nestjs/common';
 import type { ClassConstructor } from 'class-transformer';
 import { ResolvedRetryPolicy } from './topology/topology.contracts';
 import type { QueueOutboxOptions } from './outbox/outbox.types';
@@ -22,6 +28,25 @@ export interface QueueModuleOptions {
   outbox?: QueueOutboxOptions;
 
   inbox?: boolean;
+}
+
+export interface QueueOptionsFactory {
+  createQueueOptions(): QueueModuleOptions | Promise<QueueModuleOptions>;
+}
+
+export interface QueueModuleAsyncOptions extends Pick<
+  ModuleMetadata,
+  'imports'
+> {
+  inject?: (InjectionToken | OptionalFactoryDependency)[];
+
+  useExisting?: Type<QueueOptionsFactory>;
+
+  useClass?: Type<QueueOptionsFactory>;
+
+  useFactory?: (
+    ...args: readonly unknown[]
+  ) => QueueModuleOptions | Promise<QueueModuleOptions>;
 }
 
 export interface RmqTopologyDefinition {
@@ -64,6 +89,8 @@ export interface RmqConsumerOptions<TPayload = unknown> {
   prefetch?: number;
 
   retryPolicy?: ResolvedRetryPolicy;
+
+  timeoutMs?: number;
 }
 
 export interface RMQContext {
