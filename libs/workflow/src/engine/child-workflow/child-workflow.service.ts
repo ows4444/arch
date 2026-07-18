@@ -231,9 +231,18 @@ export class ChildWorkflowService {
     }
 
     // Everything not yet resolved could still, in the best case, succeed —
-    // if even that best case can't reach `min`, it never will.
+    // if even that best case can't reach `min`, it never will. Guarded by
+    // `siblings.length > 0` for the same reason 'all' is: zero siblings
+    // usually means the fan-out's children haven't been spawned yet (or
+    // never will be, e.g. a process crash between the parent's own commit
+    // and `spawnFanOut`'s afterCommit callback actually running) rather
+    // than a genuine "nothing left could succeed" — without this guard,
+    // WorkflowAutoRecoveryService's stuck-join sweep would treat a parent
+    // it catches in that exact window as unreachable and resume it with an
+    // empty join summary before any child ever ran.
     const stillInFlight = siblings.length - resolvedCount;
-    const unreachable = succeededCount + stillInFlight < min;
+    const unreachable =
+      siblings.length > 0 && succeededCount + stillInFlight < min;
 
     return { shouldResume: unreachable, unreachable };
   }
@@ -480,7 +489,7 @@ export class ChildWorkflowService {
       case 'ignore':
         // 'ignore' is terminal immediately — if this child belongs to an
         // active fan-out, its permanent failure may now satisfy an 'all'
-        // join that would otherwise wait forever (see isJoinQuorumMet).
+        // join that would otherwise wait forever (see evaluateJoin).
         if (child.joinId) {
           await this.checkJoinQuorum(parent.workflowId);
         }

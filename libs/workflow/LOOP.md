@@ -1577,3 +1577,141 @@ PASS (`npm run lint`)
   limitation raised while implementing them has been addressed. Further
   work on `libs/workflow` would come from a fresh review pass, not a
   carried-forward backlog.
+
+# Loop 013
+
+**Library:** libs/workflow
+**Date:** 2026-07-18
+
+## Goal
+
+Fresh Phase 1/2 review pass, per explicit user request — not continuing
+the (now-closed) ARCH.md backlog. Scoped scrutiny toward Loops 004-012
+(the ARCH.md feature work), since that code had been build-and-tested but
+not adversarially re-read the way Loops 1-3's original review passes
+covered the pre-existing engine.
+
+## Files Reviewed
+
+- `child-workflow.service.ts` in full (777 lines — the file that grew the
+  most across Loops 008-012) — read start to finish rather than
+  incrementally, specifically looking for interactions *between* features
+  added in different loops that no single loop's own review would have
+  caught.
+- Cross-checked `WorkflowLifecycleService.create()`'s `afterCommit`
+  deferral of `startChildren()` against `WorkflowStepPersistenceService
+  .completeStep()`'s identical deferral of `spawnFanOut()`, and read
+  `TypeOrmWorkflowTransactionRunner.execute()`'s actual `afterCommit`
+  semantics (runs sequentially, in-process, after the commit; a thrown
+  callback is logged but swallowed, not re-thrown) to confirm a
+  crash-or-swallowed-failure window between "parent commits to
+  `'waiting-children'`" and "children actually get spawned" is real, not
+  hypothetical.
+- Repo-wide grep for stale references to the loop-011 rename
+  (`isJoinQuorumMet` → `evaluateJoin`) and for the same
+  zero-siblings-as-unreachable shape elsewhere (scheduler, etc.) — found
+  nowhere else.
+
+## Problems Found
+
+**High**
+- `evaluateJoin`'s `'any'`/`{ min }` branch computed `unreachable =
+  succeededCount + stillInFlight < min` with no floor on `siblings.length`
+  — unlike the `'all'` branch, which already guards with `siblings.length
+  > 0 && ...`. When `siblings.length === 0`, this evaluates to `true` for
+  any `min >= 1`. This state (parent already `'waiting-children'` with
+  *zero* spawned children) is reachable: `WorkflowStepPersistenceService
+  .completeStep()` commits the parent's transition to `'waiting-children'`
+  *before* `spawnFanOut()` ever runs (deferred to the same `afterCommit`
+  pattern `startChildren()` already uses for `trigger: 'onStart'`
+  children) — a process crash, or `spawnFanOut()`'s own
+  `parentFailureHandler.failExecution()` call itself throwing (e.g. a
+  `WorkflowConcurrencyError`, silently swallowed per the transaction
+  runner's afterCommit semantics above), can leave the parent stuck in
+  that state with no children ever spawned. `WorkflowAutoRecoveryService`'s
+  Loop-010 stuck-join sweep is the only caller that can observe this
+  window — `onChildCompleted`/`onChildFailed` are both event-driven off an
+  actual child, so by construction at least one sibling already exists
+  whenever they fire. Net effect: the sweep meant to be a *safety net* for
+  a stuck join could instead resume it prematurely with an empty
+  `WorkflowJoinSummary`, before any branch ever ran.
+
+**Low**
+- A comment in `onChildFailed`'s `'ignore'` case still referenced
+  `isJoinQuorumMet` by name — the method Loop 011 renamed to
+  `evaluateJoin`. Stale, but harmless (a doc comment, not a behavioral
+  bug) — fixed alongside the High finding since it's in the same file and
+  trivial.
+
+## Changes Made
+
+- Added `siblings.length > 0 &&` to the `unreachable` computation in
+  `evaluateJoin`'s `'any'`/`{ min }` branch, mirroring `'all'`'s existing
+  guard — zero siblings now always means "not yet resolvable" rather than
+  "unreachable," for both policy shapes.
+- Fixed the stale `isJoinQuorumMet` comment reference to `evaluateJoin`.
+
+## Why
+
+- The fix intentionally does *not* attempt to solve the deeper,
+  pre-existing gap it surfaces: there is no recovery mechanism at all for
+  "a workflow's committed state implies an `afterCommit` side effect
+  (`startChildren`, `spawnFanOut`, lifecycle-event publishing) that never
+  ran or silently failed." That gap is symmetric between `trigger:
+  'onStart'` children (already existed before any of this session's
+  loops) and `trigger: 'step'` fan-out children (introduced in Loop 008) —
+  it's a systemic characteristic of the `afterCommit` pattern itself, not
+  specific to fan-out. Fully closing it would mean a new "detect
+  committed-but-never-materialized side effects" sweep, a design decision
+  well beyond a review-pass bug fix. This loop closes the *specific,
+  newly-introduced* bad interaction (the stuck-join sweep drawing the
+  wrong conclusion from that pre-existing gap), and records the broader
+  gap here rather than silently expanding scope to fix it, per Section 17.
+- Did not change the `'all'` branch — it was never wrong; it already had
+  the guard the `'any'`/`{ min }` branch was missing.
+
+## Tests
+
+`libs/workflow` suite is now 47 spec files / 447 tests (up from 47/446).
+New regression test on `checkJoinQuorum` directly (bypassing the
+event-driven call sites, since they can't reproduce a zero-siblings state)
+proving a `{ min: 2 }` join with no spawned children yet does not resume.
+Full monorepo suite: 103 suites / 877 tests, all passing.
+
+## Build
+
+PASS (`npx tsc --noEmit -p tsconfig.json`)
+
+## Lint
+
+PASS (`npm run lint`)
+
+## Remaining TODO
+
+- The broader "no recovery for a committed-but-never-materialized
+  `afterCommit` side effect" gap (see Why) remains open, affecting both
+  `startChildren()` and `spawnFanOut()` symmetrically. Not fixed this
+  loop — flagged as a real architectural gap worth a deliberate design
+  decision (likely a new sweep, or moving side-effect scheduling into the
+  same transaction with an explicit outbox-style pattern like
+  `libs/queue` already uses) rather than a quick patch.
+- SRP observation, not acted on: `ChildWorkflowService` is now 777 lines
+  covering five distinct concerns (static child lifecycle, failure-policy
+  dispatch, fan-out spawning, join-quorum evaluation, join summarization).
+  A future loop could reasonably split join-quorum/summarization into its
+  own `WorkflowJoinService`, but this pass didn't attempt it — four
+  separate call sites (`WorkflowStepPersistenceService`,
+  `WorkflowStepExecutor`, `WorkflowAutoRecoveryService`, and the two
+  lifecycle services) are already wired to the current shape, and a
+  mechanical split with no behavior change has real diff cost for
+  benefit that's organizational, not correctness-bearing — didn't meet
+  the bar to do opportunistically inside a review pass looking for bugs.
+
+## Next Loop
+
+- The `afterCommit` side-effect durability gap (Remaining TODO above) is
+  the most substantive open item — likely candidate for a future Design
+  Mode session (Section 0) rather than an Improvement Loop patch, since it
+  affects the shape of a cross-cutting pattern (not just one call site).
+  The `ChildWorkflowService` SRP split is a lower-priority, purely
+  organizational follow-up.

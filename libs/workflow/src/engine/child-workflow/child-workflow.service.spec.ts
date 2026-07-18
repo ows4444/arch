@@ -692,6 +692,19 @@ describe('ChildWorkflowService', () => {
       expect(executor.resumeJoin).toHaveBeenCalledWith('parent-1');
     });
 
+    it("does not treat zero-siblings-found as unreachable under 'any'/{ min } (regression: a stuck-join sweep re-check landing before spawnFanOut's children exist must not resume with an empty result)", async () => {
+      const { service, stateService, executor } = setup();
+      stateService.load.mockResolvedValue(
+        waitingParent({ joinPolicy: { min: 2 } }),
+      );
+      stateService.findByParentWorkflowId.mockResolvedValue([]);
+
+      const resumed = await service.checkJoinQuorum('parent-1');
+
+      expect(resumed).toBe(false);
+      expect(executor.resumeJoin).not.toHaveBeenCalled();
+    });
+
     it('logs rather than throws when resumeJoin fails', async () => {
       const { service, stateService, executor } = setup();
       stateService.load.mockResolvedValue(waitingParent());
