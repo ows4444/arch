@@ -28,4 +28,16 @@ export class IoRedisClientAdapter implements RedisClient {
   pttl(key: string): Promise<number> {
     return this.client.pttl(key);
   }
+
+  async scan(
+    cursor: string,
+    matchPattern: string,
+    count: number,
+  ): Promise<readonly [cursor: string, keys: string[]]> {
+    return this.client.scan(cursor, 'MATCH', matchPattern, 'COUNT', count);
+  }
+
+  unlink(...keys: string[]): Promise<number> {
+    return this.client.unlink(...keys);
+  }
 }
