@@ -69,6 +69,15 @@ class TestController {
   plainMethod(): string {
     return 'plain-result';
   }
+
+  @Cacheable({ cache: 'items', key: (id: string) => `item:${id}` })
+  @CacheEvict({
+    cache: 'related',
+    key: (...args: unknown[]) => `related:${args[0] as string}`,
+  })
+  getItemAndEvictRelated(_id: string): string {
+    return 'handler-result';
+  }
 }
 
 describe('CacheInterceptor', () => {
@@ -214,6 +223,42 @@ describe('CacheInterceptor', () => {
 
       await firstValueFrom(observable);
       expect(cacheManager.delete).toHaveBeenCalledWith('items', 'item:42');
+    });
+  });
+
+  describe('stacking @Cacheable with @CacheEvict/@CachePut (regression)', () => {
+    it('applies the evict side effect on a @Cacheable miss', async () => {
+      const cacheManager = fakeCacheManager();
+      const interceptor = new CacheInterceptor(reflector, cacheManager);
+      const controller = new TestController();
+      const handle = jest.fn(() => of('handler-result'));
+
+      const observable = interceptor.intercept(
+        fakeContext(controller.getItemAndEvictRelated, ['42']),
+        { handle },
+      );
+
+      await expect(firstValueFrom(observable)).resolves.toBe('handler-result');
+      expect(handle).toHaveBeenCalledTimes(1);
+      expect(cacheManager.delete).toHaveBeenCalledWith('related', 'related:42');
+    });
+
+    it('still applies the evict side effect on a @Cacheable hit, without re-invoking the handler', async () => {
+      const cacheManager = fakeCacheManager({
+        get: jest.fn().mockResolvedValue('cached-value'),
+      });
+      const interceptor = new CacheInterceptor(reflector, cacheManager);
+      const controller = new TestController();
+      const handle = jest.fn(() => of('handler-result'));
+
+      const observable = interceptor.intercept(
+        fakeContext(controller.getItemAndEvictRelated, ['42']),
+        { handle },
+      );
+
+      await expect(firstValueFrom(observable)).resolves.toBe('cached-value');
+      expect(handle).not.toHaveBeenCalled();
+      expect(cacheManager.delete).toHaveBeenCalledWith('related', 'related:42');
     });
   });
 });

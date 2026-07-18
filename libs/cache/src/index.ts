@@ -12,7 +12,7 @@ export * from './core/statistics-aware-cache.interface';
 export * from './core/cache-entry-value.interface';
 export * from './core/cache-metadata.interface';
 export * from './core/is-metadata-aware-cache';
-export * from './core/cache-options';
+export * from './core/is-statistics-aware-cache';
 export * from './core/cache-storage.interface';
 
 export * from './interfaces/cache.interfaces';

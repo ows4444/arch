@@ -79,3 +79,137 @@ PASS (`npm run lint`)
 - Consider the deferred Low items, in particular whether `CacheModule` should become `@Global()` for consistency with `DatabaseCoreModule`/`QueueModule` (needs a decision, not just a mechanical fix — may be an intentional named-cache-scoping choice).
 - Decide fate of `core/cache-options.ts`'s `CacheOptions` (remove vs. find a use) and `CacheEntry.metadata`/`.size` (implement vs. remove).
 - Consider whether Redis-backed caches should support a "best-effort partial clear" mode, or whether the current all-reject behavior should just be better documented at the `CacheManager.clear()` call site.
+
+# Loop 002
+
+**Library:** libs/cache
+**Date:** 2026-07-17
+
+## Goal
+
+Close the Low-priority backlog from Loop 001's Next Loop notes. Each item
+needed a decision (not a mechanical fix), so investigated all four before
+implementing to confirm the premise held up.
+
+## Files Reviewed
+
+- `nest/cache.module.ts`, `libs/database/src/module/database-core.module.ts`,
+  `libs/queue/src/queue.module.ts` (to confirm the `@Global()` precedent and
+  check whether anything outside `AppModule` currently depends on cache
+  injection)
+- `core/cache-options.ts`, `core/cache-entry.ts` (dead-code confirmation via
+  grep for any producer/consumer)
+- `caches/redis.cache.ts`, `src/redis/ioredis-client.adapter.ts` (Redis
+  `clear()`/enumeration limitation, and whether ioredis exposes `SCAN`/
+  `UNLINK`)
+- `nest/cache.interceptor.ts` (the `@Cacheable`+`@CachePut`/`@CacheEvict`
+  stacking bug)
+- `core/is-statistics-aware-cache.ts` / barrel symmetry (trivial, folded in)
+
+## Problems Found / Investigated
+
+**Confirmed as real, not just style**
+- `CacheModule` was a plain `@Module({})` — not `@Global()`, unlike
+  `DatabaseCoreModule`/`QueueModule`. Confirmed via grep that nothing in
+  `src/` outside `AppModule` currently injects cache providers, meaning the
+  gap has been consequence-free so far — but any future feature module that
+  tried would fail to resolve `CACHE_MANAGER`/`CacheService`, and
+  re-importing `CacheModule.forRoot()` a second time to work around it would
+  create a broken second registry with empty options. This was a latent bug
+  waiting for the first real consumer, not a style nit.
+- `core/cache-options.ts`'s `CacheOptions` and `CacheEntry.metadata`/`.size`:
+  confirmed zero producers and zero consumers anywhere in the lib via grep
+  (only self-referencing export statements). `libs/cache` has no
+  `package.json` (unlike `libs/workflow`), so it's internal-only — no
+  external package consumer could be relying on either.
+- Redis `clear()`/`keys()`/`values()`/`entries()`/`size()` always rejecting:
+  confirmed `IoRedisClientAdapter` (the app's real client) sits on top of
+  ioredis, which natively supports both `SCAN` (cursor-based enumeration)
+  and `UNLINK` — so a namespace-scoped implementation was actually
+  buildable, not just theoretically nice-to-have.
+- `@Cacheable` + `@CachePut`/`@CacheEvict` stacking: confirmed by reading
+  `cache.interceptor.ts` that a cache HIT returns the cached value via
+  `from(Promise.resolve(cached))`, completely bypassing the `execute()`
+  wrapper that applies put/evict side effects — those only ever ran on a
+  miss. Zero code in this repo currently stacks these decorators, so
+  today's blast radius is zero, but it's a real footgun.
+
+## Changes Made
+
+- `CacheModule`: added `@Global()` class decorator plus `global: true` on
+  both `forRoot`/`forRootAsync` DynamicModule returns (matching
+  `QueueModule`'s belt-and-suspenders pattern exactly).
+- Deleted `core/cache-options.ts` (and its barrel export); removed
+  `CacheEntry.metadata`/`.size` fields.
+- Added the missing `export * from './core/is-statistics-aware-cache'`
+  barrel entry (symmetry with the already-exported `is-metadata-aware-cache`).
+- `RedisClient` gained optional `scan`/`unlink` methods. `RedisCacheStore`:
+  - New private `scanNamespaceKeys()` — paginates `SCAN` across cursors,
+    matching only this cache's own `namespace:*` prefix.
+  - `clear()` now `UNLINK`s the scanned keys when both `scan`/`unlink` are
+    present, and only then — otherwise still rejects with an explanatory
+    error naming the missing capability.
+  - `keys()`, `values()`, `entries()`, `size()` similarly switch from
+    always-reject to SCAN-backed implementations when available.
+  - `IoRedisClientAdapter` (`src/redis/`) now implements both, wiring the
+    real app's Redis-backed caches up to the new capability.
+- `CacheInterceptor.intercept`: extracted `applyPutEvict(result)`, called
+  both from the miss path (`execute()`, unchanged behavior) and now also
+  from the `@Cacheable` hit path (previously skipped entirely). The
+  underlying handler still never re-runs on a hit — only the put/evict side
+  effects now fire consistently regardless of hit/miss.
+- New/extended tests: `redis.cache.spec.ts` gained a
+  `scoped SCAN+UNLINK when the client supports it` block (7 tests: cursor
+  pagination, values/entries composition, size, clear with/without keys to
+  delete, and the still-rejects-when-only-half-supported case);
+  `cache.interceptor.spec.ts` gained 2 regression tests proving evict fires
+  on both a `@Cacheable` miss and hit without re-invoking the handler;
+  `cache.module.spec.ts` gained 3 regression tests proving `@Global()`
+  actually makes cache providers injectable from a feature module that
+  never imports `CacheModule`.
+
+## Why
+
+- All four items were investigated rather than assumed, per the "needs a
+  decision, not just a mechanical fix" framing carried over from Loop 1 —
+  in each case the investigation confirmed the fix was both safe and
+  valuable, so all four were implemented per the (recommended-option)
+  answers given.
+- The Redis SCAN+UNLINK design deliberately stays scoped to the cache's own
+  namespace prefix — the whole point of Loop 1's original all-reject
+  behavior was avoiding a `FLUSHDB`-style blast radius across tenants/other
+  caches sharing the same Redis instance; this preserves that safety
+  property while making the methods actually usable.
+- The interceptor fix intentionally still skips re-invoking the wrapped
+  handler on a `@Cacheable` hit — only extended so put/evict side effects
+  apply consistently, since re-running business logic on a cache hit would
+  defeat the purpose of `@Cacheable` entirely.
+
+## Tests
+
+`libs/cache` suite is now 13 spec files / 151 tests (up from 140). Full
+monorepo suite: 95 suites / 748 tests, all passing.
+
+## Build
+
+PASS (`npx tsc --noEmit -p tsconfig.json`)
+
+## Lint
+
+PASS (`npm run lint`)
+
+## Remaining TODO
+
+- No `ARCH.md` exists for this library yet.
+- Redis/Memory TTL precision mismatch (Redis rounds to whole seconds via
+  `Math.ceil(ttlMs / 1000)`, `MemoryCache` uses millisecond precision) —
+  still just noted, not documented or changed this loop.
+
+## Next Loop
+
+- Document (or reconsider) the Redis/Memory TTL precision mismatch.
+- No Critical/High findings open. `libs/cache` is now at the same stopping
+  point as `libs/queue`/`libs/workflow` — remaining work is polish rather
+  than defect-driven. `libs/database` still has its own deferred Next Loop
+  items (`Symbol.for` token risk, `RepositoryResolver` dead methods,
+  `CursorPagination` types) if the loop continues there next.

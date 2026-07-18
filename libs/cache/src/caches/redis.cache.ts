@@ -1,10 +1,6 @@
 import { CacheValue } from '../core/cache-entry-value.interface';
 import { CacheStatistics } from '../core/cache-statistics';
-import {
-  Cache,
-  CacheDeleteOptions,
-  CacheSetOptions,
-} from '../core/cache.interface';
+import { CacheDeleteOptions, CacheSetOptions } from '../core/cache.interface';
 import { StatisticsAwareCache } from '../core/statistics-aware-cache.interface';
 import {
   CachePlugin,
@@ -24,6 +20,21 @@ export interface RedisClient {
   exists(key: string): Promise<boolean | number>;
 
   pttl?(key: string): Promise<number>;
+
+  /**
+   * Optional. When provided (alongside `unlink`), enables `clear()`/`keys()`/
+   * `values()`/`entries()`/`size()` via a namespace-scoped `SCAN` instead of
+   * always rejecting — safe because it's restricted to this cache's own
+   * `namespace:*` prefix, unlike a broad `FLUSHDB`/`KEYS *`.
+   */
+  scan?(
+    cursor: string,
+    matchPattern: string,
+    count: number,
+  ): Promise<readonly [cursor: string, keys: string[]]>;
+
+  /** Optional; see `scan`. */
+  unlink?(...keys: string[]): Promise<number>;
 }
 
 export class RedisCacheStore<V> implements StatisticsAwareCache<string, V> {
@@ -129,36 +140,86 @@ export class RedisCacheStore<V> implements StatisticsAwareCache<string, V> {
     return Boolean(await this.client.exists(this.key(key)));
   }
 
-  clear(): Promise<void> {
-    return Promise.reject(
-      new Error(
-        'Redis cache cannot clear all keys. Use a namespaced Redis client implementation.',
-      ),
+  private static readonly SCAN_BATCH_SIZE = 100;
+
+  /**
+   * Enumerates every key under this cache's own `namespace:*` prefix via
+   * `SCAN`, never touching keys outside it. Returns raw (namespaced) keys.
+   */
+  private async scanNamespaceKeys(): Promise<string[]> {
+    const pattern = `${this.key('')}*`;
+    const found: string[] = [];
+    let cursor = '0';
+
+    do {
+      const [nextCursor, batch] = await this.client.scan!(
+        cursor,
+        pattern,
+        RedisCacheStore.SCAN_BATCH_SIZE,
+      );
+
+      found.push(...batch);
+      cursor = nextCursor;
+    } while (cursor !== '0');
+
+    return found;
+  }
+
+  async clear(): Promise<void> {
+    if (!this.client.scan || !this.client.unlink) {
+      throw new Error(
+        'Redis cache cannot clear all keys: the configured RedisClient does ' +
+          'not implement scan/unlink. Provide a client implementing both ' +
+          "(safe — clear() only ever scans this cache's own namespace), or " +
+          'use a namespaced Redis client implementation.',
+      );
+    }
+
+    const keys = await this.scanNamespaceKeys();
+
+    if (keys.length > 0) {
+      await this.client.unlink(...keys);
+    }
+  }
+
+  async keys(): Promise<readonly string[]> {
+    if (!this.client.scan) {
+      throw new Error(
+        'Redis cache does not support enumerating keys: the configured ' +
+          'RedisClient does not implement scan.',
+      );
+    }
+
+    const prefix = this.key('');
+    const raw = await this.scanNamespaceKeys();
+
+    return raw.map((k) => k.slice(prefix.length));
+  }
+
+  async values(): Promise<readonly V[]> {
+    const keys = await this.keys();
+    const values: (V | undefined)[] = await Promise.all(
+      keys.map((k) => this.get(k)),
+    );
+
+    return values.filter((v): v is V => v !== undefined);
+  }
+
+  async entries(): Promise<readonly (readonly [string, V])[]> {
+    const keys = await this.keys();
+    const pairs: (readonly [string, V | undefined])[] = await Promise.all(
+      keys.map(async (k) => [k, await this.get(k)] as const),
+    );
+
+    return pairs.filter(
+      (pair): pair is readonly [string, V] => pair[1] !== undefined,
     );
   }
 
-  size(): Promise<number> {
-    return Promise.reject(
-      new Error('Redis does not efficiently support cache size.'),
-    );
-  }
+  async size(): Promise<number> {
+    const keys = await this.keys();
 
-  keys(): Promise<readonly string[]> {
-    return Promise.reject(
-      new Error('Redis cache does not support enumerating keys.'),
-    );
-  }
-
-  values(): Promise<readonly V[]> {
-    return Promise.reject(
-      new Error('Redis cache does not support enumerating values.'),
-    );
-  }
-
-  entries(): Promise<readonly (readonly [string, V])[]> {
-    return Promise.reject(
-      new Error('Redis cache does not support enumerating entries.'),
-    );
+    return keys.length;
   }
 
   statistics(): Promise<Readonly<CacheStatistics>> {

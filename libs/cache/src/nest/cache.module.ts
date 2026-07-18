@@ -1,4 +1,4 @@
-import { DynamicModule, Module, Provider } from '@nestjs/common';
+import { DynamicModule, Global, Module, Provider } from '@nestjs/common';
 import { CACHE, CACHE_MANAGER, CACHE_OPTIONS } from '../cache.constants';
 import { CacheFactory } from '../cache.factory';
 import { CacheRegistry } from '../cache-registry';
@@ -13,6 +13,7 @@ import { CacheModuleValidator } from '../cache.module.validator';
 import { CacheInterceptor } from './cache.interceptor';
 import { APP_INTERCEPTOR } from '@nestjs/core';
 
+@Global()
 @Module({})
 export class CacheModule {
   private static createRegistry(options: CacheModuleOptions): CacheRegistry {
@@ -78,6 +79,7 @@ export class CacheModule {
     CacheModuleValidator.validate(options);
     return {
       module: CacheModule,
+      global: true,
       providers: [
         {
           provide: CacheRegistry,
@@ -122,6 +124,7 @@ export class CacheModule {
   static forRootAsync(options: CacheModuleAsyncOptions): DynamicModule {
     return {
       module: CacheModule,
+      global: true,
       imports: options.imports ?? [],
       providers: [
         ...this.createAsyncOptionsProviders(options),

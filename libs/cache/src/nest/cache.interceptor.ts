@@ -52,28 +52,32 @@ export class CacheInterceptor implements NestInterceptor {
       return next.handle();
     }
 
+    // Applies @CachePut/@CacheEvict side effects for `result`, regardless of
+    // whether `result` came from actually running the handler or from a
+    // @Cacheable hit — stacking these decorators only makes sense if the
+    // put/evict side effects fire on every call, not just on cache misses.
+    const applyPutEvict = async (result: unknown): Promise<unknown> => {
+      if (put) {
+        await this.cacheManager.set(
+          put.cache ?? 'default',
+          put.key(...args),
+          result,
+          put.ttl,
+        );
+      }
+
+      if (evict) {
+        await this.cacheManager.delete(
+          evict.cache ?? 'default',
+          evict.key(...args),
+        );
+      }
+
+      return result;
+    };
+
     const execute = () =>
-      next.handle().pipe(
-        mergeMap(async (result: unknown) => {
-          if (put) {
-            await this.cacheManager.set(
-              put.cache ?? 'default',
-              put.key(...args),
-              result,
-              put.ttl,
-            );
-          }
-
-          if (evict) {
-            await this.cacheManager.delete(
-              evict.cache ?? 'default',
-              evict.key(...args),
-            );
-          }
-
-          return result;
-        }),
-      );
+      next.handle().pipe(mergeMap((result: unknown) => applyPutEvict(result)));
 
     if (!metadata) {
       return execute();
@@ -85,7 +89,7 @@ export class CacheInterceptor implements NestInterceptor {
     return from(this.cacheManager.get(cache, key)).pipe(
       mergeMap((cached) => {
         if (cached !== undefined) {
-          return from(Promise.resolve(cached));
+          return from(applyPutEvict(cached));
         }
 
         return from(

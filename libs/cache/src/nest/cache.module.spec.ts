@@ -133,4 +133,38 @@ describe('CacheModule', () => {
       );
     });
   });
+
+  describe('@Global() registration (regression)', () => {
+    it('is injectable from a feature module that never imports CacheModule', async () => {
+      @Injectable()
+      class FeatureService {
+        constructor(readonly registry: CacheRegistry) {}
+      }
+
+      @Module({ providers: [FeatureService] })
+      class FeatureModule {}
+
+      const moduleRef = await Test.createTestingModule({
+        imports: [CacheModule.forRoot(baseOptions()), FeatureModule],
+      }).compile();
+
+      expect(moduleRef.get(FeatureService).registry).toBeInstanceOf(
+        CacheRegistry,
+      );
+    });
+
+    it('forRoot marks the dynamic module global', () => {
+      const module = CacheModule.forRoot(baseOptions());
+
+      expect(module.global).toBe(true);
+    });
+
+    it('forRootAsync marks the dynamic module global', () => {
+      const module = CacheModule.forRootAsync({
+        useFactory: () => baseOptions(),
+      });
+
+      expect(module.global).toBe(true);
+    });
+  });
 });

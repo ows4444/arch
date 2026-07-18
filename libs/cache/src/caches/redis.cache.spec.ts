@@ -99,4 +99,111 @@ describe('RedisCacheStore', () => {
       },
     );
   });
+
+  describe('scoped SCAN+UNLINK when the client supports it', () => {
+    function scanningClient(
+      entries: Record<string, string>,
+      overrides: Partial<RedisClient> = {},
+    ): RedisClient {
+      const store = new Map(Object.entries(entries));
+
+      return fakeClient({
+        get: jest.fn((key: string) =>
+          Promise.resolve(store.has(key) ? (store.get(key) ?? null) : null),
+        ),
+        scan: jest.fn((cursor: string) => {
+          const allKeys = [...store.keys()];
+
+          if (cursor === '0') {
+            // Split into two SCAN batches to exercise cursor pagination.
+            const mid = Math.ceil(allKeys.length / 2);
+            return Promise.resolve([
+              allKeys.length > 1 ? '1' : '0',
+              allKeys.slice(0, mid),
+            ] as const);
+          }
+
+          const mid = Math.ceil(allKeys.length / 2);
+          return Promise.resolve(['0', allKeys.slice(mid)] as const);
+        }),
+        unlink: jest.fn((...keys: string[]) => {
+          for (const key of keys) {
+            store.delete(key);
+          }
+          return Promise.resolve(keys.length);
+        }),
+        ...overrides,
+      });
+    }
+
+    it("keys() returns bare keys scoped to this cache's namespace, paginating across cursors", async () => {
+      const client = scanningClient({
+        'cache:a': JSON.stringify('1'),
+        'cache:b': JSON.stringify('2'),
+      });
+      const store = new RedisCacheStore<string>(client, undefined, 'cache');
+
+      const keys = await store.keys();
+
+      expect([...keys].sort()).toEqual(['a', 'b']);
+    });
+
+    it('values() and entries() resolve via keys() + get()', async () => {
+      const client = scanningClient({
+        'cache:a': JSON.stringify('1'),
+        'cache:b': JSON.stringify('2'),
+      });
+      const store = new RedisCacheStore<string>(client, undefined, 'cache');
+
+      await expect(store.values()).resolves.toEqual(
+        expect.arrayContaining(['1', '2']),
+      );
+      await expect(store.entries()).resolves.toEqual(
+        expect.arrayContaining([
+          ['a', '1'],
+          ['b', '2'],
+        ]),
+      );
+    });
+
+    it('size() reflects the number of keys under this namespace', async () => {
+      const client = scanningClient({
+        'cache:a': JSON.stringify('1'),
+        'cache:b': JSON.stringify('2'),
+        'cache:c': JSON.stringify('3'),
+      });
+      const store = new RedisCacheStore<string>(client, undefined, 'cache');
+
+      await expect(store.size()).resolves.toBe(3);
+    });
+
+    it('clear() unlinks only the keys under this namespace', async () => {
+      const client = scanningClient({
+        'cache:a': JSON.stringify('1'),
+        'cache:b': JSON.stringify('2'),
+      });
+      const store = new RedisCacheStore<string>(client, undefined, 'cache');
+
+      await store.clear();
+
+      expect(client.unlink).toHaveBeenCalledWith('cache:a', 'cache:b');
+    });
+
+    it('clear() does not call unlink when there is nothing to delete', async () => {
+      const client = scanningClient({});
+      const store = new RedisCacheStore<string>(client, undefined, 'cache');
+
+      await store.clear();
+
+      expect(client.unlink).not.toHaveBeenCalled();
+    });
+
+    it('still rejects clear() when scan is present but unlink is not', () => {
+      const client = scanningClient({ 'cache:a': JSON.stringify('1') });
+      delete (client as { unlink?: unknown }).unlink;
+      const store = new RedisCacheStore<string>(client, undefined, 'cache');
+
+      return expect(store.clear()).rejects.toThrow(/scan\/unlink/);
+    });
+  });
 });
