@@ -40,7 +40,10 @@ export class WorkflowLifecycleService {
     workflow: RegisteredWorkflow;
     state: WorkflowExecutionState;
   }> {
-    const workflow = this.registry.getLatest(workflowName);
+    const workflow = this.registry.resolve(
+      workflowName,
+      options?.workflowVersion,
+    );
 
     const state = this.stateFactory.create(workflow, initialData, options);
 

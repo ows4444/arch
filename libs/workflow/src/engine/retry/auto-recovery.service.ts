@@ -6,6 +6,7 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import { SchedulerRegistry } from '@nestjs/schedule';
+import { ChildWorkflowService } from '../child-workflow/child-workflow.service';
 import { WorkflowExecutor } from '../executor/executor';
 import { WorkflowRegistry } from '../registry/registry';
 import { WorkflowRecoveryService } from './recovery.service';
@@ -28,6 +29,7 @@ export class WorkflowAutoRecoveryService
     private readonly executor: WorkflowExecutor,
     private readonly registry: WorkflowRegistry,
     private readonly scheduler: SchedulerRegistry,
+    private readonly children: ChildWorkflowService,
 
     @Inject(WORKFLOW_METRICS)
     private readonly metrics: WorkflowMetrics,
@@ -101,6 +103,8 @@ export class WorkflowAutoRecoveryService
     let recoveredCount = 0;
     let stuckCount = 0;
     let expiredCount = 0;
+    let sleepWokenCount = 0;
+    let stuckJoinResumedCount = 0;
 
     const recoverable =
       await this.recovery.findRecoverableExecutions(batchSize);
@@ -228,12 +232,72 @@ export class WorkflowAutoRecoveryService
       }
     }
 
-    if (recoveredCount > 0 || stuckCount > 0 || expiredCount > 0) {
+    const sleeping = await this.recovery.findSleepingReady(batchSize);
+
+    for (const workflow of sleeping) {
+      try {
+        await this.executor.wake(workflow.workflowId);
+        sleepWokenCount++;
+        this.logger.debug(
+          `Woke sleeping workflow=${workflow.workflowName} ` +
+            `workflowId=${workflow.workflowId} ` +
+            `sleepUntil=${workflow.sleepUntil?.toISOString() ?? 'unknown'}`,
+        );
+      } catch (error) {
+        this.logger.error(
+          `Failed to wake sleeping workflow=${workflow.workflowName} ` +
+            `workflowId=${workflow.workflowId}`,
+          error instanceof Error ? error.stack : String(error),
+        );
+      }
+    }
+
+    // Safety net for `ChildWorkflowService.checkJoinQuorum`'s event-driven
+    // resume path: a parent whose join quorum was already met but whose
+    // `resumeJoin()` call failed the first time (e.g. a lease race) has no
+    // other wake trigger, unlike sleeping workflows which are woken purely
+    // by time. Re-check every currently-'waiting-children' parent — this
+    // is a no-op for the (overwhelmingly common) case where quorum
+    // genuinely isn't met yet, since checkJoinQuorum re-evaluates it fresh.
+    const waitingOnChildren =
+      await this.recovery.findWaitingChildrenExecutions(batchSize);
+
+    for (const workflow of waitingOnChildren) {
+      try {
+        const resumed = await this.children.checkJoinQuorum(
+          workflow.workflowId,
+        );
+
+        if (resumed) {
+          stuckJoinResumedCount++;
+          this.logger.debug(
+            `Resumed stuck join for workflow=${workflow.workflowName} ` +
+              `workflowId=${workflow.workflowId} joinId=${workflow.joinId ?? 'unknown'}`,
+          );
+        }
+      } catch (error) {
+        this.logger.error(
+          `Failed to re-check join quorum for workflow=${workflow.workflowName} ` +
+            `workflowId=${workflow.workflowId}`,
+          error instanceof Error ? error.stack : String(error),
+        );
+      }
+    }
+
+    if (
+      recoveredCount > 0 ||
+      stuckCount > 0 ||
+      expiredCount > 0 ||
+      sleepWokenCount > 0 ||
+      stuckJoinResumedCount > 0
+    ) {
       this.logger.log(
         `Recovery sweep complete — ` +
           `recovered=${recoveredCount} ` +
           `stuckDetected=${stuckCount} ` +
-          `expiredCancelled=${expiredCount}`,
+          `expiredCancelled=${expiredCount} ` +
+          `sleepWoken=${sleepWokenCount} ` +
+          `stuckJoinResumed=${stuckJoinResumedCount}`,
       );
     } else {
       this.logger.debug('Recovery sweep complete — nothing to process');
@@ -242,5 +306,7 @@ export class WorkflowAutoRecoveryService
     this.metrics.sweepRecovered(recoveredCount);
     this.metrics.sweepStuckDetected(stuckCount);
     this.metrics.sweepExpiredCancelled(expiredCount);
+    this.metrics.sweepStuckJoinResumed(stuckJoinResumedCount);
+    this.metrics.sweepSleepWoken(sleepWokenCount);
   }
 }

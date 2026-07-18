@@ -43,6 +43,13 @@ export interface WorkflowStateStore {
     limit?: number,
   ): Promise<WorkflowExecutionState[]>;
 
+  findSleepingReady?(
+    readyAt?: Date,
+    limit?: number,
+  ): Promise<WorkflowExecutionState[]>;
+
+  findWaitingChildren?(limit?: number): Promise<WorkflowExecutionState[]>;
+
   findFailed?(): Promise<WorkflowExecutionState[]>;
 
   findCompleted?(

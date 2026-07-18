@@ -34,6 +34,10 @@ export interface WorkflowMetrics {
 
   sweepExpiredCancelled(count: number): void;
 
+  sweepSleepWoken(count: number): void;
+
+  sweepStuckJoinResumed(count: number): void;
+
   retentionDeleted(count: number): void;
 
   retentionArchived(count: number): void;

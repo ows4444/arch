@@ -46,7 +46,7 @@ export class TypeOrmWorkflowStateStore
       .find({
         where: {
           ...(workflowName && { workflowName }),
-          status: In(['running', 'waiting']),
+          status: In(['running', 'waiting', 'sleeping']),
         },
       })
       .then((entities) => entities.map((e) => WorkflowStateMapper.toDomain(e)));
@@ -183,6 +183,15 @@ export class TypeOrmWorkflowStateStore
     return this.findByStatus('waiting');
   }
 
+  async findWaitingChildren(limit?: number): Promise<WorkflowExecutionState[]> {
+    return this.repository
+      .find({
+        where: { status: 'waiting-children' },
+        ...(limit !== undefined ? { take: limit } : {}),
+      })
+      .then((entities) => entities.map((e) => WorkflowStateMapper.toDomain(e)));
+  }
+
   async findWaitingExpired(
     olderThanMs: number,
     limit?: number,
@@ -192,6 +201,18 @@ export class TypeOrmWorkflowStateStore
     return this.repository
       .find({
         where: { status: 'waiting', waitingSince: LessThan(threshold) },
+        ...(limit !== undefined ? { take: limit } : {}),
+      })
+      .then((entities) => entities.map((e) => WorkflowStateMapper.toDomain(e)));
+  }
+
+  async findSleepingReady(
+    readyAt = new Date(),
+    limit?: number,
+  ): Promise<WorkflowExecutionState[]> {
+    return this.repository
+      .find({
+        where: { status: 'sleeping', sleepUntil: LessThanOrEqual(readyAt) },
         ...(limit !== undefined ? { take: limit } : {}),
       })
       .then((entities) => entities.map((e) => WorkflowStateMapper.toDomain(e)));

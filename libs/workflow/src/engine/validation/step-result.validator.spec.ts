@@ -64,4 +64,92 @@ describe('WorkflowStepResultValidator.validate', () => {
       }),
     ).not.toThrow();
   });
+
+  it('throws when sleepUntil is set without a resume step', () => {
+    const wf = workflow(['step-1']);
+
+    expect(() =>
+      validator.validate(wf, currentStep, {
+        sleepUntil: new Date(),
+      }),
+    ).toThrow(/sleeps but does not specify a resume step/);
+  });
+
+  it('throws when sleepMs is set without a resume step', () => {
+    const wf = workflow(['step-1']);
+
+    expect(() =>
+      validator.validate(wf, currentStep, {
+        sleepMs: 1000,
+      }),
+    ).toThrow(/sleeps but does not specify a resume step/);
+  });
+
+  it('does not throw when sleepUntil is paired with a known resume step', () => {
+    const wf = workflow(['step-1', 'step-2']);
+
+    expect(() =>
+      validator.validate(wf, currentStep, {
+        sleepUntil: new Date(),
+        nextStep: createWorkflowStepId('step-2'),
+      }),
+    ).not.toThrow();
+  });
+
+  it('throws when both waitForSignal and sleepUntil are set', () => {
+    const wf = workflow(['step-1', 'step-2']);
+
+    expect(() =>
+      validator.validate(wf, currentStep, {
+        waitForSignal: { name: 'approval', signalId: 'sig-1' },
+        sleepUntil: new Date(),
+        nextStep: createWorkflowStepId('step-2'),
+      }),
+    ).toThrow(/must use only one of waitForSignal, sleep, or spawnChildren/);
+  });
+
+  it('throws when spawnChildren is set without a join step', () => {
+    const wf = workflow(['step-1']);
+
+    expect(() =>
+      validator.validate(wf, currentStep, {
+        spawnChildren: [{ workflow: class {} }],
+      }),
+    ).toThrow(/spawns children but does not specify a join step/);
+  });
+
+  it('does not throw when spawnChildren is paired with a known join step', () => {
+    const wf = workflow(['step-1', 'join-step']);
+
+    expect(() =>
+      validator.validate(wf, currentStep, {
+        spawnChildren: [{ workflow: class {} }],
+        nextStep: createWorkflowStepId('join-step'),
+      }),
+    ).not.toThrow();
+  });
+
+  it('throws when spawnChildren is combined with waitForSignal', () => {
+    const wf = workflow(['step-1', 'join-step']);
+
+    expect(() =>
+      validator.validate(wf, currentStep, {
+        spawnChildren: [{ workflow: class {} }],
+        waitForSignal: { name: 'approval', signalId: 'sig-1' },
+        nextStep: createWorkflowStepId('join-step'),
+      }),
+    ).toThrow(/must use only one of waitForSignal, sleep, or spawnChildren/);
+  });
+
+  it('throws when spawnChildren is combined with sleep', () => {
+    const wf = workflow(['step-1', 'join-step']);
+
+    expect(() =>
+      validator.validate(wf, currentStep, {
+        spawnChildren: [{ workflow: class {} }],
+        sleepMs: 1000,
+        nextStep: createWorkflowStepId('join-step'),
+      }),
+    ).toThrow(/must use only one of waitForSignal, sleep, or spawnChildren/);
+  });
 });

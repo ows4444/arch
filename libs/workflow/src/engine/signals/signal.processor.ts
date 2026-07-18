@@ -71,6 +71,17 @@ export class WorkflowSignalProcessor {
           `Workflow '${workflowId}' has been cancelled.`,
         );
 
+      case 'sleeping':
+        throw new WorkflowExecutionError(
+          `Workflow '${workflowId}' is sleeping until ` +
+            `${state.sleepUntil?.toISOString() ?? 'unknown'}; cannot accept signals.`,
+        );
+
+      case 'waiting-children':
+        throw new WorkflowExecutionError(
+          `Workflow '${workflowId}' is waiting on fanned-out child workflows; cannot accept signals.`,
+        );
+
       case 'running':
       case 'waiting':
         break;

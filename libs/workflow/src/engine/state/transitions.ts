@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { WorkflowExecutionError } from '../../errors/workflow.errors';
 import { WorkflowExecutionState } from '../../models/workflow-execution-state';
 import { WorkflowFailure } from '../../models/workflow-failure';
+import { WorkflowJoinPolicy } from '../../models/workflow-join-policy';
 import { WorkflowSignal } from '../../models/workflow-signal';
 import { WorkflowStepExecution } from '../../models/workflow-step-execution';
 import {
@@ -34,6 +35,9 @@ export class WorkflowStateTransitions {
     | 'executingStep'
     | 'waitingForSignal'
     | 'waitingSince'
+    | 'sleepUntil'
+    | 'joinId'
+    | 'joinPolicy'
     | 'resumeStep'
     | 'retryAt'
     | 'stepStartedAt'
@@ -43,6 +47,9 @@ export class WorkflowStateTransitions {
       executingStep: undefined,
       waitingForSignal: undefined,
       waitingSince: undefined,
+      sleepUntil: undefined,
+      joinId: undefined,
+      joinPolicy: undefined,
       resumeStep: undefined,
       retryAt: undefined,
       stepStartedAt: undefined,
@@ -130,6 +137,35 @@ export class WorkflowStateTransitions {
     });
   }
 
+  resumeFromSleep(state: WorkflowExecutionState): WorkflowExecutionState {
+    return this.touch({
+      ...state,
+      ...this.clearExecutionContext(),
+      status: 'running',
+      currentStep: state.resumeStep,
+    });
+  }
+
+  /**
+   * Unlike `resumeFromSignal`/`resumeFromSleep`, deliberately preserves
+   * `joinId`/`joinPolicy` rather than clearing them via
+   * `clearExecutionContext()` — the join step itself needs `joinId` to look
+   * up its own fan-out results (`WorkflowContext.runtime.joinResults()`,
+   * backed by `ChildWorkflowService.summarizeJoin`). They're cleared
+   * naturally the next time `completeStep` runs (i.e. once the join step
+   * finishes), same as every other execution-context field.
+   */
+  resumeFromJoin(state: WorkflowExecutionState): WorkflowExecutionState {
+    return this.touch({
+      ...state,
+      ...this.clearExecutionContext(),
+      status: 'running',
+      currentStep: state.resumeStep,
+      joinId: state.joinId,
+      joinPolicy: state.joinPolicy,
+    });
+  }
+
   markRecoverable(
     state: WorkflowExecutionState,
     reason: WorkflowExecutionState['recoveryReason'],
@@ -205,6 +241,8 @@ export class WorkflowStateTransitions {
     nextStep?: WorkflowStepId,
     waitForSignal?: WorkflowSignal,
     data?: object,
+    sleepUntil?: Date,
+    join?: { joinId: string; joinPolicy: WorkflowJoinPolicy },
   ): WorkflowExecutionState {
     const mergedData =
       data === undefined
@@ -223,6 +261,35 @@ export class WorkflowStateTransitions {
         data: mergedData,
         waitingForSignal: waitForSignal,
         waitingSince: new Date(),
+        resumeStep: nextStep,
+        historyCount: state.historyCount + 1,
+        iteration: state.iteration + 1,
+      });
+    }
+
+    if (sleepUntil) {
+      return this.touch({
+        ...state,
+        ...this.clearExecutionContext(),
+        stepRetryCount: 0,
+        status: 'sleeping',
+        data: mergedData,
+        sleepUntil,
+        resumeStep: nextStep,
+        historyCount: state.historyCount + 1,
+        iteration: state.iteration + 1,
+      });
+    }
+
+    if (join) {
+      return this.touch({
+        ...state,
+        ...this.clearExecutionContext(),
+        stepRetryCount: 0,
+        status: 'waiting-children',
+        data: mergedData,
+        joinId: join.joinId,
+        joinPolicy: join.joinPolicy,
         resumeStep: nextStep,
         historyCount: state.historyCount + 1,
         iteration: state.iteration + 1,

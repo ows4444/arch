@@ -15,6 +15,9 @@ import { WorkflowStepExecutor } from '../engine/executor/step-executor';
 import { WorkflowStepPersistenceService } from '../engine/executor/step-persistence';
 import { WorkflowStepResolver } from '../engine/executor/step-resolver';
 import { WorkflowHookExecutor } from '../engine/hooks/hook-executor';
+import { WorkflowQueryDispatchService } from '../engine/query/query-dispatch.service';
+import { WorkflowScheduleRegistrationService } from '../engine/scheduling/schedule-registration.service';
+import { WorkflowSchedulerService } from '../engine/scheduling/scheduler.service';
 import { WorkflowCompletionService } from '../engine/lifecycle/completion.service';
 import { WorkflowFailureService } from '../engine/lifecycle/failure.service';
 import { WorkflowLifecyclePublisher } from '../engine/lifecycle/lifecycle.publisher';
@@ -91,6 +94,9 @@ const BASE_PROVIDERS: Provider[] = [
   },
 
   WorkflowClient,
+  WorkflowQueryDispatchService,
+  WorkflowScheduleRegistrationService,
+  WorkflowSchedulerService,
   WorkflowRegistry,
   WorkflowDiscovery,
   WorkflowDefinitionValidator,

@@ -79,6 +79,60 @@ export class WorkflowStateValidator {
 
         break;
 
+      case 'sleeping':
+        if (!state.sleepUntil) {
+          throw new WorkflowExecutionError(
+            `Sleeping workflow '${state.workflowId}' missing sleepUntil`,
+          );
+        }
+
+        if (!state.resumeStep) {
+          throw new WorkflowExecutionError(
+            `Sleeping workflow '${state.workflowId}' has no resume step`,
+          );
+        }
+
+        if (state.executingStep) {
+          throw new WorkflowExecutionError(
+            `Sleeping workflow '${state.workflowId}' is still executing step '${state.executingStep}'`,
+          );
+        }
+
+        if (state.waitingForSignal) {
+          throw new WorkflowExecutionError(
+            `Sleeping workflow '${state.workflowId}' cannot also wait for a signal`,
+          );
+        }
+
+        break;
+
+      case 'waiting-children':
+        if (!state.joinId) {
+          throw new WorkflowExecutionError(
+            `Workflow '${state.workflowId}' waiting on children missing joinId`,
+          );
+        }
+
+        if (!state.resumeStep) {
+          throw new WorkflowExecutionError(
+            `Workflow '${state.workflowId}' waiting on children has no resume step`,
+          );
+        }
+
+        if (state.executingStep) {
+          throw new WorkflowExecutionError(
+            `Workflow '${state.workflowId}' waiting on children is still executing step '${state.executingStep}'`,
+          );
+        }
+
+        if (state.waitingForSignal) {
+          throw new WorkflowExecutionError(
+            `Workflow '${state.workflowId}' waiting on children cannot also wait for a signal`,
+          );
+        }
+
+        break;
+
       case 'cancelled':
         if (state.executingStep) {
           throw new WorkflowExecutionError(

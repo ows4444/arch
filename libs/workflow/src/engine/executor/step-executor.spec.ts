@@ -38,6 +38,11 @@ function setup() {
         }),
     ),
   };
+  const children = {
+    summarizeJoin: jest
+      .fn()
+      .mockResolvedValue({ succeeded: [], failed: [], pending: [] }),
+  };
 
   const executor = new WorkflowStepExecutor(
     resolver as never,
@@ -48,6 +53,7 @@ function setup() {
     stateService as never,
     leaseService as never,
     persistence as never,
+    children as never,
   );
 
   const workflow = {
@@ -69,6 +75,7 @@ function setup() {
     stateService,
     leaseService,
     persistence,
+    children,
   };
 }
 
@@ -100,6 +107,41 @@ describe('WorkflowStepExecutor', () => {
 
     expect(leaseService.renew).toHaveBeenCalledWith('workflow-1');
     expect(stopKeepAlive).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not expose runtime.joinResults when the step is not resuming from a join', async () => {
+    const { executor, workflow, handler } = setup();
+    handler.execute.mockResolvedValue({ nextStep: undefined });
+
+    await executor.execute(workflow as never, state());
+
+    const [context] = handler.execute.mock.calls[0] as [
+      { runtime: { joinResults?: unknown } },
+    ];
+    expect(context.runtime.joinResults).toBeUndefined();
+  });
+
+  it('exposes runtime.joinResults backed by ChildWorkflowService.summarizeJoin when resuming from a join', async () => {
+    const { executor, workflow, handler, children } = setup();
+    handler.execute.mockResolvedValue({ nextStep: undefined });
+    const joinState = createWorkflowExecutionState({
+      currentStep: createWorkflowStepId('step-1'),
+      executingStep: createWorkflowStepId('step-1'),
+      joinId: 'workflow-1:fan-out:1',
+    });
+    const summary = { succeeded: [], failed: [], pending: [] };
+    children.summarizeJoin.mockResolvedValue(summary);
+
+    await executor.execute(workflow as never, joinState);
+
+    const [context] = handler.execute.mock.calls[0] as [
+      { runtime: { joinResults: () => Promise<unknown> } },
+    ];
+    await expect(context.runtime.joinResults()).resolves.toBe(summary);
+    expect(children.summarizeJoin).toHaveBeenCalledWith(
+      'workflow-1',
+      'workflow-1:fan-out:1',
+    );
   });
 
   it('returns the handler result directly when the workflow has no retry policy', async () => {

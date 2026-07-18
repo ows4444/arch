@@ -120,6 +120,58 @@ export class WorkflowStateService {
     return persisted;
   }
 
+  async wake(workflowId: string): Promise<WorkflowExecutionState> {
+    return this.transactionRunner.executeOrJoin(() =>
+      this.wakeInternal(workflowId),
+    );
+  }
+
+  private async wakeInternal(
+    workflowId: string,
+  ): Promise<WorkflowExecutionState> {
+    const state = await this.load(workflowId);
+
+    if (!state) {
+      throw new WorkflowExecutionError(`Workflow '${workflowId}' not found`);
+    }
+
+    if (state.status !== 'sleeping') {
+      throw new WorkflowExecutionError(
+        `Workflow '${workflowId}' cannot be woken from status '${state.status}'`,
+      );
+    }
+
+    const resumed = this.transitions.resumeFromSleep(state);
+
+    return this.save(state, resumed);
+  }
+
+  async resumeJoin(workflowId: string): Promise<WorkflowExecutionState> {
+    return this.transactionRunner.executeOrJoin(() =>
+      this.resumeJoinInternal(workflowId),
+    );
+  }
+
+  private async resumeJoinInternal(
+    workflowId: string,
+  ): Promise<WorkflowExecutionState> {
+    const state = await this.load(workflowId);
+
+    if (!state) {
+      throw new WorkflowExecutionError(`Workflow '${workflowId}' not found`);
+    }
+
+    if (state.status !== 'waiting-children') {
+      throw new WorkflowExecutionError(
+        `Workflow '${workflowId}' cannot resume a join from status '${state.status}'`,
+      );
+    }
+
+    const resumed = this.transitions.resumeFromJoin(state);
+
+    return this.save(state, resumed);
+  }
+
   async findCompleted(
     workflowName?: string,
     workflowVersion?: number,

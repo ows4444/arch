@@ -5,6 +5,7 @@ import { TypeOrmWorkflowEntityManagerProvider } from '../typeorm-workflow-entity
 import { WorkflowConcurrencyError } from '../../../../errors/workflow.errors';
 import { createTestDataSource } from '../../../../testing/typeorm-test-datasource';
 import { createWorkflowExecutionState } from '../../../../testing/fixtures/state.factory';
+import { createWorkflowStepId } from '../../../../models/workflow-step-id';
 
 describe('TypeOrmWorkflowStateStore', () => {
   let dataSource: DataSource;
@@ -109,7 +110,7 @@ describe('TypeOrmWorkflowStateStore', () => {
     expect(results[0]!.workflowId).toBe('wf-1');
   });
 
-  it('finds only running/waiting workflows as active', async () => {
+  it('finds only running/waiting/sleeping workflows as active', async () => {
     await store.insert(
       createWorkflowExecutionState({ workflowId: 'wf-1', status: 'running' }),
     );
@@ -120,10 +121,44 @@ describe('TypeOrmWorkflowStateStore', () => {
         currentStep: undefined,
       }),
     );
+    await store.insert(
+      createWorkflowExecutionState({
+        workflowId: 'wf-3',
+        status: 'sleeping',
+        currentStep: undefined,
+        sleepUntil: new Date(),
+        resumeStep: createWorkflowStepId('step-1'),
+      }),
+    );
 
     const active = await store.findActive();
 
-    expect(active.map((s) => s.workflowId)).toEqual(['wf-1']);
+    expect(active.map((s) => s.workflowId).sort()).toEqual(['wf-1', 'wf-3']);
+  });
+
+  it('finds sleeping workflows whose sleepUntil has elapsed', async () => {
+    await store.insert(
+      createWorkflowExecutionState({
+        workflowId: 'wf-1',
+        status: 'sleeping',
+        currentStep: undefined,
+        sleepUntil: new Date(Date.now() - 1000),
+        resumeStep: createWorkflowStepId('step-1'),
+      }),
+    );
+    await store.insert(
+      createWorkflowExecutionState({
+        workflowId: 'wf-2',
+        status: 'sleeping',
+        currentStep: undefined,
+        sleepUntil: new Date(Date.now() + 60_000),
+        resumeStep: createWorkflowStepId('step-1'),
+      }),
+    );
+
+    const ready = await store.findSleepingReady(new Date());
+
+    expect(ready.map((s) => s.workflowId)).toEqual(['wf-1']);
   });
 
   it('finds workflows by parentWorkflowId', async () => {

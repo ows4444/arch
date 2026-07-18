@@ -2,9 +2,11 @@ import { WorkflowDiscovery } from './discovery';
 import { WorkflowConfigurationError } from '../../errors/workflow.errors';
 import {
   WORKFLOW_METADATA,
+  WORKFLOW_QUERY_METADATA,
   WORKFLOW_STEP_METADATA,
 } from '../../constants/workflow.constants';
 import { WorkflowMetadata } from '../../definition/workflow-metadata';
+import { WorkflowQueryMetadata } from '../../definition/workflow-query-metadata';
 
 class WorkflowA {}
 class WorkflowB {}
@@ -24,10 +26,13 @@ function baseMetadata(
   } as WorkflowMetadata;
 }
 
-function setup(metadataByType: Map<unknown, WorkflowMetadata>) {
-  const providers = [...metadataByType.keys()].map((metatype) => ({
-    metatype,
-  }));
+function setup(
+  metadataByType: Map<unknown, WorkflowMetadata>,
+  queryMetadataByType: Map<unknown, WorkflowQueryMetadata> = new Map(),
+) {
+  const providers = [
+    ...new Set([...metadataByType.keys(), ...queryMetadataByType.keys()]),
+  ].map((metatype) => ({ metatype }));
 
   const discovery = { getProviders: jest.fn().mockReturnValue(providers) };
 
@@ -39,6 +44,10 @@ function setup(metadataByType: Map<unknown, WorkflowMetadata>) {
 
       if (token === WORKFLOW_STEP_METADATA) {
         return undefined;
+      }
+
+      if (token === WORKFLOW_QUERY_METADATA) {
+        return queryMetadataByType.get(type);
       }
 
       return undefined;
@@ -183,6 +192,66 @@ describe('WorkflowDiscovery', () => {
       workflowDiscovery.onModuleInit();
 
       expect(registry.register).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  describe('query registration', () => {
+    class SummaryQueryHandler {}
+    class DuplicateQueryHandler {}
+
+    it('registers a query handler under the workflow it references', () => {
+      const metadataByType = new Map<unknown, WorkflowMetadata>([
+        [WorkflowA, baseMetadata({ name: 'workflow-a' })],
+      ]);
+      const queryMetadataByType = new Map<unknown, WorkflowQueryMetadata>([
+        [SummaryQueryHandler, { workflow: 'workflow-a', name: 'summary' }],
+      ]);
+
+      const { workflowDiscovery, registry } = setup(
+        metadataByType,
+        queryMetadataByType,
+      );
+
+      workflowDiscovery.onModuleInit();
+
+      const [registered] = registry.register.mock.calls[0] as [
+        { queries: Map<string, unknown> },
+      ];
+      expect(registered.queries.get('summary')).toBe(SummaryQueryHandler);
+    });
+
+    it('throws when two query handlers on the same workflow share a name', () => {
+      const metadataByType = new Map<unknown, WorkflowMetadata>([
+        [WorkflowA, baseMetadata({ name: 'workflow-a' })],
+      ]);
+      const queryMetadataByType = new Map<unknown, WorkflowQueryMetadata>([
+        [SummaryQueryHandler, { workflow: 'workflow-a', name: 'summary' }],
+        [DuplicateQueryHandler, { workflow: 'workflow-a', name: 'summary' }],
+      ]);
+
+      const { workflowDiscovery } = setup(metadataByType, queryMetadataByType);
+
+      expect(() => workflowDiscovery.onModuleInit()).toThrow(
+        /Duplicate query 'summary'/,
+      );
+    });
+
+    it('throws when a query handler references an unknown workflow', () => {
+      const metadataByType = new Map<unknown, WorkflowMetadata>([
+        [WorkflowA, baseMetadata({ name: 'workflow-a' })],
+      ]);
+      const queryMetadataByType = new Map<unknown, WorkflowQueryMetadata>([
+        [
+          SummaryQueryHandler,
+          { workflow: 'missing-workflow', name: 'summary' },
+        ],
+      ]);
+
+      const { workflowDiscovery } = setup(metadataByType, queryMetadataByType);
+
+      expect(() => workflowDiscovery.onModuleInit()).toThrow(
+        /references unknown workflow 'missing-workflow'/,
+      );
     });
   });
 });

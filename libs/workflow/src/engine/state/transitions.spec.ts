@@ -177,5 +177,108 @@ describe('WorkflowStateTransitions', () => {
 
       expect(next.data).toBe(state.data);
     });
+
+    it('transitions to sleeping status with sleepUntil and a resume step', () => {
+      const state = createWorkflowExecutionState();
+      const sleepUntil = new Date('2026-01-02T00:00:00.000Z');
+
+      const next = transitions.completeStep(
+        state,
+        execution,
+        createWorkflowStepId('step-2'),
+        undefined,
+        undefined,
+        sleepUntil,
+      );
+
+      expect(next.status).toBe('sleeping');
+      expect(next.sleepUntil).toBe(sleepUntil);
+      expect(next.resumeStep).toBe('step-2');
+      expect(next.executingStep).toBeUndefined();
+      expect(next.historyCount).toBe(state.historyCount + 1);
+      expect(next.iteration).toBe(state.iteration + 1);
+    });
+
+    it('transitions to waiting-children status with joinId/joinPolicy and a resume step', () => {
+      const state = createWorkflowExecutionState();
+
+      const next = transitions.completeStep(
+        state,
+        execution,
+        createWorkflowStepId('join-step'),
+        undefined,
+        undefined,
+        undefined,
+        { joinId: 'wf-1:step-1:1', joinPolicy: 'any' },
+      );
+
+      expect(next.status).toBe('waiting-children');
+      expect(next.joinId).toBe('wf-1:step-1:1');
+      expect(next.joinPolicy).toBe('any');
+      expect(next.resumeStep).toBe('join-step');
+      expect(next.executingStep).toBeUndefined();
+      expect(next.historyCount).toBe(state.historyCount + 1);
+      expect(next.iteration).toBe(state.iteration + 1);
+    });
+  });
+
+  describe('resumeFromSleep', () => {
+    it('resumes at resumeStep, clears sleepUntil, and sets status running', () => {
+      const state = createWorkflowExecutionState({
+        status: 'sleeping',
+        sleepUntil: new Date(),
+        resumeStep: createWorkflowStepId('step-3'),
+      });
+
+      const next = transitions.resumeFromSleep(state);
+
+      expect(next.status).toBe('running');
+      expect(next.currentStep).toBe('step-3');
+      expect(next.sleepUntil).toBeUndefined();
+      expect(next.resumeStep).toBeUndefined();
+    });
+  });
+
+  describe('resumeFromJoin', () => {
+    it('resumes at resumeStep, sets status running, and preserves joinId/joinPolicy for the join step to inspect', () => {
+      const state = createWorkflowExecutionState({
+        status: 'waiting-children',
+        joinId: 'wf-1:step-1:1',
+        joinPolicy: 'all',
+        resumeStep: createWorkflowStepId('step-4'),
+      });
+
+      const next = transitions.resumeFromJoin(state);
+
+      expect(next.status).toBe('running');
+      expect(next.currentStep).toBe('step-4');
+      expect(next.joinId).toBe('wf-1:step-1:1');
+      expect(next.joinPolicy).toBe('all');
+      expect(next.resumeStep).toBeUndefined();
+    });
+
+    it('clears joinId/joinPolicy once the join step itself completes', () => {
+      const resumed = transitions.resumeFromJoin(
+        createWorkflowExecutionState({
+          status: 'waiting-children',
+          joinId: 'wf-1:step-1:1',
+          joinPolicy: 'all',
+          resumeStep: createWorkflowStepId('step-4'),
+        }),
+      );
+
+      const next = transitions.completeStep(
+        resumed,
+        {
+          step: createWorkflowStepId('step-4'),
+          startedAt: new Date(),
+          status: 'completed',
+        },
+        createWorkflowStepId('step-5'),
+      );
+
+      expect(next.joinId).toBeUndefined();
+      expect(next.joinPolicy).toBeUndefined();
+    });
   });
 });

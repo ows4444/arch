@@ -34,6 +34,7 @@ function setup() {
     ),
   };
   const persistence = { snapshot: jest.fn().mockResolvedValue(undefined) };
+  const children = { spawnFanOut: jest.fn().mockResolvedValue(undefined) };
 
   const callOrder: string[] = [];
   const transactionRunner = {
@@ -43,6 +44,7 @@ function setup() {
       callOrder.push('transaction-end');
       return result;
     }),
+    afterCommit: jest.fn((callback: () => Promise<void>) => callback()),
   };
 
   const service = new WorkflowStepPersistenceService(
@@ -50,6 +52,7 @@ function setup() {
     transitions as never,
     stateService as never,
     persistence as never,
+    children as never,
     transactionRunner as never,
   );
 
@@ -58,6 +61,7 @@ function setup() {
     history,
     transitions,
     stateService,
+    children,
     persistence,
     transactionRunner,
     callOrder,
@@ -122,6 +126,8 @@ describe('WorkflowStepPersistenceService', () => {
         undefined,
         undefined,
         undefined,
+        undefined,
+        undefined,
       );
       expect(stateService.save).toHaveBeenCalledWith(
         state,
@@ -149,6 +155,8 @@ describe('WorkflowStepPersistenceService', () => {
         createWorkflowStepId('step-2'),
         { name: 'approval', signalId: 'sig-1' },
         { approved: true },
+        undefined,
+        undefined,
       );
     });
 

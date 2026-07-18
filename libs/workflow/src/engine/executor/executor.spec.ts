@@ -32,6 +32,8 @@ function setup() {
   const stateService = {
     load: jest.fn(),
     cancel: jest.fn(),
+    wake: jest.fn(),
+    resumeJoin: jest.fn(),
     findByParentWorkflowId: jest.fn(),
   };
   const failureService = { failExecution: jest.fn(), handleFailure: jest.fn() };
@@ -156,6 +158,70 @@ describe('WorkflowExecutor', () => {
       await expect(executor.resume(state.workflowId)).rejects.toThrow(error);
 
       expect(failureService.failExecution).toHaveBeenCalledWith(state, error);
+    });
+  });
+
+  describe('wake', () => {
+    it('wakes and finalizes the workflow', async () => {
+      const { executor, runner, stateService } = setup();
+      const state = createWorkflowExecutionState({ status: 'running' });
+      const finalState = createWorkflowExecutionState({ status: 'completed' });
+
+      stateService.wake.mockResolvedValue(state);
+      runner.run.mockResolvedValue(finalState);
+      stateService.load.mockResolvedValue(finalState);
+
+      const result = await executor.wake(state.workflowId);
+
+      expect(stateService.wake).toHaveBeenCalledWith(state.workflowId);
+      expect(result.status).toBe('completed');
+    });
+
+    it('reports the failure via handleFailure and rethrows when the runner throws', async () => {
+      const { executor, runner, failureService, stateService } = setup();
+      const state = createWorkflowExecutionState({ status: 'running' });
+      const error = new Error('step blew up');
+
+      stateService.wake.mockResolvedValue(state);
+      runner.run.mockRejectedValue(error);
+      stateService.load.mockResolvedValue(null);
+
+      await expect(executor.wake(state.workflowId)).rejects.toThrow(error);
+
+      expect(failureService.handleFailure).toHaveBeenCalledWith(state, error);
+    });
+  });
+
+  describe('resumeJoin', () => {
+    it('resumes the join and finalizes the workflow', async () => {
+      const { executor, runner, stateService } = setup();
+      const state = createWorkflowExecutionState({ status: 'running' });
+      const finalState = createWorkflowExecutionState({ status: 'completed' });
+
+      stateService.resumeJoin.mockResolvedValue(state);
+      runner.run.mockResolvedValue(finalState);
+      stateService.load.mockResolvedValue(finalState);
+
+      const result = await executor.resumeJoin(state.workflowId);
+
+      expect(stateService.resumeJoin).toHaveBeenCalledWith(state.workflowId);
+      expect(result.status).toBe('completed');
+    });
+
+    it('reports the failure via handleFailure and rethrows when the runner throws', async () => {
+      const { executor, runner, failureService, stateService } = setup();
+      const state = createWorkflowExecutionState({ status: 'running' });
+      const error = new Error('step blew up');
+
+      stateService.resumeJoin.mockResolvedValue(state);
+      runner.run.mockRejectedValue(error);
+      stateService.load.mockResolvedValue(null);
+
+      await expect(executor.resumeJoin(state.workflowId)).rejects.toThrow(
+        error,
+      );
+
+      expect(failureService.handleFailure).toHaveBeenCalledWith(state, error);
     });
   });
 

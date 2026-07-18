@@ -1,2 +1,8 @@
 export type WorkflowStatus =
-  'running' | 'waiting' | 'completed' | 'failed' | 'cancelled';
+  | 'running'
+  | 'waiting'
+  | 'sleeping'
+  | 'waiting-children'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';

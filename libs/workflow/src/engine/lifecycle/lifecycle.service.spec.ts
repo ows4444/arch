@@ -7,6 +7,7 @@ function setup() {
   const registry = {
     getLatest: jest.fn(),
     get: jest.fn().mockReturnValue({ metadata: { name: 'test-workflow' } }),
+    resolve: jest.fn(),
   };
   const stateFactory = { create: jest.fn() };
   const stateService = {
@@ -83,15 +84,29 @@ describe('WorkflowLifecycleService', () => {
       const workflow = { metadata: { name: 'test-workflow' } };
       const state = createWorkflowExecutionState();
 
-      registry.getLatest.mockReturnValue(workflow);
+      registry.resolve.mockReturnValue(workflow);
       stateFactory.create.mockReturnValue(state);
 
       const result = await service.create('test-workflow', {});
 
+      expect(registry.resolve).toHaveBeenCalledWith('test-workflow', undefined);
       expect(stateService.insert).toHaveBeenCalledWith(state);
       expect(publisher.started).toHaveBeenCalledWith(workflow, state);
       expect(children.startChildren).toHaveBeenCalledWith(workflow, state);
       expect(result).toEqual({ workflow, state });
+    });
+
+    it('resolves a specific workflowVersion when passed via options', async () => {
+      const { service, registry, stateFactory } = setup();
+      const workflow = { metadata: { name: 'test-workflow', version: 2 } };
+      const state = createWorkflowExecutionState();
+
+      registry.resolve.mockReturnValue(workflow);
+      stateFactory.create.mockReturnValue(state);
+
+      await service.create('test-workflow', {}, { workflowVersion: 2 });
+
+      expect(registry.resolve).toHaveBeenCalledWith('test-workflow', 2);
     });
   });
 

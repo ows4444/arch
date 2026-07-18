@@ -11,6 +11,7 @@ import { WorkflowStepResult } from '../../models/workflow-step-result';
 import { WorkflowHistoryService } from '../../persistence/history.service';
 import { WorkflowPersistenceService } from '../../persistence/workflow-persistence.service';
 import { RegisteredWorkflow } from '../../models/registered-workflow';
+import { ChildWorkflowService } from '../child-workflow/child-workflow.service';
 
 @Injectable()
 export class WorkflowStepPersistenceService {
@@ -19,6 +20,7 @@ export class WorkflowStepPersistenceService {
     private readonly transitions: WorkflowStateTransitions,
     private readonly stateService: WorkflowStateService,
     private readonly persistence: WorkflowPersistenceService,
+    private readonly children: ChildWorkflowService,
 
     @Inject(WORKFLOW_TRANSACTION_RUNNER)
     private readonly transactionRunner: WorkflowTransactionRunner,
@@ -52,17 +54,40 @@ export class WorkflowStepPersistenceService {
     return this.transactionRunner.executeOrJoin(async () => {
       await this.history.append(previous.workflowId, execution);
 
+      const sleepUntil =
+        result.sleepUntil ??
+        (result.sleepMs !== undefined
+          ? new Date(Date.now() + result.sleepMs)
+          : undefined);
+
+      const join = result.spawnChildren?.length
+        ? {
+            joinId: `${previous.workflowId}:${execution.step}:${previous.historyCount + 1}`,
+            joinPolicy: result.joinPolicy ?? 'all',
+          }
+        : undefined;
+
       const next = this.transitions.completeStep(
         previous,
         execution,
         result.nextStep,
         result.waitForSignal,
         result.data,
+        sleepUntil,
+        join,
       );
 
       const persisted = await this.stateService.save(previous, next);
 
       await this.persistence.snapshot(workflow, persisted);
+
+      if (join && result.spawnChildren?.length) {
+        const spawnSpecs = result.spawnChildren;
+
+        this.transactionRunner.afterCommit?.(() =>
+          this.children.spawnFanOut(workflow, persisted, spawnSpecs),
+        );
+      }
 
       return persisted;
     });

@@ -15,4 +15,12 @@ export interface WorkflowChildMetadata {
   readonly cancellationPolicy: WorkflowChildCancellationPolicy;
 
   readonly maxRetries?: number;
+
+  /**
+   * `'onStart'` (default): started automatically once, when the parent
+   * itself starts (existing behavior). `'step'`: never auto-started —
+   * only spawned when a step's `WorkflowStepResult.spawnChildren`
+   * references this workflow class (fan-out).
+   */
+  readonly trigger?: 'onStart' | 'step';
 }

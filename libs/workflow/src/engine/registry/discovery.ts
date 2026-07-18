@@ -4,6 +4,7 @@ import { DiscoveryService, Reflector } from '@nestjs/core';
 import {
   WORKFLOW_HOOK_METADATA,
   WORKFLOW_METADATA,
+  WORKFLOW_QUERY_METADATA,
   WORKFLOW_SIGNAL_METADATA,
 } from '../../constants/workflow.constants';
 import { WORKFLOW_STEP_METADATA } from '../../constants/workflow.constants';
@@ -12,10 +13,12 @@ import { WorkflowSignalMetadata } from '../signals/signal.metadata';
 import { WorkflowDefinitionValidator } from '../validation/definition.validator';
 import { WorkflowRegistry } from './registry';
 import { WorkflowMetadata } from '../../definition/workflow-metadata';
+import { WorkflowQueryMetadata } from '../../definition/workflow-query-metadata';
 import { WorkflowStepMetadata } from '../../definition/workflow-step-metadata';
 import { WorkflowConfigurationError } from '../../errors/workflow.errors';
 import { WorkflowStepHandler } from '../../handlers/workflow-step-handler';
 import { RegisteredWorkflowStep } from '../../models/registered-workflow';
+import { WorkflowQueryHandler } from '../../models/workflow-query-handler';
 import { WorkflowStepId } from '../../models/workflow-step-id';
 import { deepFreeze } from '../../shared/utils/deep-freeze';
 
@@ -23,6 +26,8 @@ interface MutableRegisteredWorkflow {
   readonly metadata: WorkflowMetadata;
   readonly workflowType: Type<unknown>;
   readonly steps: Map<WorkflowStepId, RegisteredWorkflowStep>;
+
+  readonly queries: Map<string, Type<WorkflowQueryHandler>>;
 
   readonly transitions: Map<WorkflowStepId, ReadonlySet<WorkflowStepId>>;
 }
@@ -53,12 +58,74 @@ export class WorkflowDiscovery implements OnModuleInit {
     });
   }
 
+  private registerQuery(
+    workflow: MutableRegisteredWorkflow,
+    metadata: WorkflowQueryMetadata,
+    type: Type<WorkflowQueryHandler>,
+  ): void {
+    if (workflow.queries.has(metadata.name)) {
+      throw new WorkflowConfigurationError(
+        `Duplicate query '${metadata.name}' in workflow '${workflow.metadata.name}'`,
+      );
+    }
+
+    workflow.queries.set(metadata.name, type);
+  }
+
   private findWorkflow(
     workflows: Map<string, MutableRegisteredWorkflow>,
     name: string,
     version: number,
   ): MutableRegisteredWorkflow | undefined {
     return workflows.get(WorkflowRegistry.buildKey(name, version));
+  }
+
+  /**
+   * Shared version-resolution logic for anything that references a workflow
+   * by name (+ optional explicit version) from a separate provider class —
+   * steps and queries both need "default to the only/highest registered
+   * version, with a helpful error naming the decorator when a version has
+   * to be picked" behavior.
+   */
+  private resolveTargetWorkflow(
+    workflows: Map<string, MutableRegisteredWorkflow>,
+    workflowName: string,
+    explicitVersion: number | undefined,
+    itemLabel: string,
+    decoratorName: string,
+  ): MutableRegisteredWorkflow {
+    const matchingVersions = [...workflows.values()]
+      .filter((w) => w.metadata.name === workflowName)
+      .map((w) => w.metadata.version);
+
+    if (explicitVersion === undefined && matchingVersions.length === 0) {
+      throw new WorkflowConfigurationError(
+        `${itemLabel} references unknown workflow '${workflowName}' — no version registered`,
+      );
+    }
+
+    const resolvedVersion = explicitVersion ?? Math.max(...matchingVersions);
+
+    const workflow = this.findWorkflow(
+      workflows,
+      workflowName,
+      resolvedVersion,
+    );
+
+    if (!workflow) {
+      const knownVersions = [...workflows.keys()]
+        .filter((k) => k.startsWith(`${workflowName}:`))
+        .map((k) => k.split(':')[1]);
+      const hint =
+        knownVersions.length > 0
+          ? ` (workflow '${workflowName}' exists at version(s) ${knownVersions.join(', ')} — did you forget to set workflowVersion on the ${decoratorName} decorator?)`
+          : '';
+      throw new WorkflowConfigurationError(
+        `${itemLabel} references unknown workflow '${workflowName}' v${resolvedVersion}${hint}`,
+      );
+    }
+
+    return workflow;
   }
 
   private validateChildWorkflowCycles(
@@ -154,6 +221,7 @@ export class WorkflowDiscovery implements OnModuleInit {
         metadata,
         workflowType: type as Type<unknown>,
         steps: new Map(),
+        queries: new Map(),
         transitions: new Map(),
       });
     }
@@ -174,40 +242,13 @@ export class WorkflowDiscovery implements OnModuleInit {
         continue;
       }
 
-      const matchingVersions = [...workflows.values()]
-        .filter((w) => w.metadata.name === metadata.workflow)
-        .map((w) => w.metadata.version);
-
-      if (
-        metadata.workflowVersion === undefined &&
-        matchingVersions.length === 0
-      ) {
-        throw new WorkflowConfigurationError(
-          `Step '${metadata.step}' references unknown workflow '${metadata.workflow}' — no version registered`,
-        );
-      }
-
-      const resolvedVersion =
-        metadata.workflowVersion ?? Math.max(...matchingVersions);
-
-      const workflow = this.findWorkflow(
+      const workflow = this.resolveTargetWorkflow(
         workflows,
         metadata.workflow,
-        resolvedVersion,
+        metadata.workflowVersion,
+        `Step '${metadata.step}'`,
+        '@Step',
       );
-
-      if (!workflow) {
-        const knownVersions = [...workflows.keys()]
-          .filter((k) => k.startsWith(`${metadata.workflow}:`))
-          .map((k) => k.split(':')[1]);
-        const hint =
-          knownVersions.length > 0
-            ? ` (workflow '${metadata.workflow}' exists at version(s) ${knownVersions.join(', ')} — did you forget to set workflowVersion on the @Step decorator?)`
-            : '';
-        throw new WorkflowConfigurationError(
-          `Step '${metadata.step}' references unknown workflow '${metadata.workflow}' v${resolvedVersion}${hint}`,
-        );
-      }
 
       if (workflow.steps.has(metadata.step)) {
         throw new WorkflowConfigurationError(
@@ -216,6 +257,33 @@ export class WorkflowDiscovery implements OnModuleInit {
       }
 
       this.registerStep(workflow, metadata, type);
+    }
+
+    for (const wrapper of providers) {
+      const type = wrapper.metatype as Type<WorkflowQueryHandler> | undefined;
+
+      if (!type) {
+        continue;
+      }
+
+      const metadata = this.reflector.get<WorkflowQueryMetadata>(
+        WORKFLOW_QUERY_METADATA,
+        type,
+      );
+
+      if (!metadata) {
+        continue;
+      }
+
+      const workflow = this.resolveTargetWorkflow(
+        workflows,
+        metadata.workflow,
+        metadata.workflowVersion,
+        `Query '${metadata.name}'`,
+        '@Query',
+      );
+
+      this.registerQuery(workflow, metadata, type);
     }
 
     this.validateChildWorkflowCycles(workflows);

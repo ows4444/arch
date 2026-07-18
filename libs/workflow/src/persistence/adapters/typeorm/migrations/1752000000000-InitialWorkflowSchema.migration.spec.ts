@@ -1,5 +1,7 @@
 import { DataSource } from 'typeorm';
 import { InitialWorkflowSchema1752000000000 } from './1752000000000-InitialWorkflowSchema.migration';
+import { WorkflowSleepUntil1752300000000 } from './1752300000000-WorkflowSleepUntil.migration';
+import { WorkflowJoin1752500000000 } from './1752500000000-WorkflowJoin.migration';
 import { WorkflowStateEntity } from '../entities/workflow-state.entity';
 import { WorkflowIdempotencyEntity } from '../entities/workflow-idempotency.entity';
 import { WorkflowSignalEntity } from '../entities/workflow-signal.entity';
@@ -8,6 +10,17 @@ import { WorkflowStepHistoryEntity } from '../entities/workflow-step-history.ent
 
 describe('InitialWorkflowSchema migration', () => {
   it('creates all five tables on up() and drops them all on down()', async () => {
+    // Runs every migration that touches `workflow_executions`' columns
+    // (not just the initial one) so an insert through the shared
+    // `WorkflowStateEntity` class matches the physical schema — the
+    // entity always reflects the latest columns regardless of which
+    // migration originally introduced them.
+    const migrations = [
+      InitialWorkflowSchema1752000000000,
+      WorkflowSleepUntil1752300000000,
+      WorkflowJoin1752500000000,
+    ];
+
     const dataSource = new DataSource({
       type: 'better-sqlite3',
       database: ':memory:',
@@ -18,7 +31,7 @@ describe('InitialWorkflowSchema migration', () => {
         WorkflowSnapshotEntity,
         WorkflowStepHistoryEntity,
       ],
-      migrations: [InitialWorkflowSchema1752000000000],
+      migrations,
       synchronize: false,
     });
 
@@ -58,7 +71,9 @@ describe('InitialWorkflowSchema migration', () => {
     const loaded = await stateRepo.findOneBy({ workflowId: 'wf-1' });
     expect(loaded?.workflowName).toBe('test');
 
-    await dataSource.undoLastMigration();
+    for (let i = 0; i < migrations.length; i++) {
+      await dataSource.undoLastMigration();
+    }
 
     for (const table of tables) {
       expect(await queryRunner.hasTable(table)).toBe(false);

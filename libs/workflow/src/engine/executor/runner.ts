@@ -145,7 +145,12 @@ export class WorkflowRunner {
 
       this.logger.stepCompleted(state, stepExecution);
 
-      if (execution.result.waitForSignal) {
+      if (
+        execution.result.waitForSignal ||
+        execution.result.sleepUntil ||
+        execution.result.sleepMs !== undefined ||
+        execution.result.spawnChildren?.length
+      ) {
         break;
       }
     }

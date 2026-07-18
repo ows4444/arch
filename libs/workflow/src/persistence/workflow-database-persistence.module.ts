@@ -5,6 +5,7 @@ import {
   WORKFLOW_HISTORY_STORE,
   WORKFLOW_IDEMPOTENCY_STORE,
   WORKFLOW_QUERY_STORE,
+  WORKFLOW_SCHEDULE_STORE,
   WORKFLOW_SIGNAL_STORE,
   WORKFLOW_SNAPSHOT_STORE,
   WORKFLOW_STATE_STORE,
@@ -14,6 +15,7 @@ import { DatabaseWorkflowEntityManagerProvider } from './adapters/database/datab
 import { DatabaseWorkflowTransactionRunner } from './adapters/database/database-workflow-transaction-runner';
 import { TypeOrmWorkflowHistoryStore } from './adapters/typeorm/stores/typeorm-workflow-history.store';
 import { TypeOrmWorkflowIdempotencyStore } from './adapters/typeorm/stores/typeorm-workflow-idempotency.store';
+import { TypeOrmWorkflowScheduleStore } from './adapters/typeorm/stores/typeorm-workflow-schedule.store';
 import { TypeOrmWorkflowSignalStore } from './adapters/typeorm/stores/typeorm-workflow-signal.store';
 import { TypeOrmWorkflowStateStore } from './adapters/typeorm/stores/typeorm-workflow-state.store';
 import { TypeOrmWorkflowSnapshotStore } from './adapters/typeorm/stores/typeorm-workflow-snapshot.store';
@@ -39,6 +41,7 @@ import { WorkflowPersistenceService } from './workflow-persistence.service';
     TypeOrmWorkflowHistoryStore,
     TypeOrmWorkflowIdempotencyStore,
     TypeOrmWorkflowSnapshotStore,
+    TypeOrmWorkflowScheduleStore,
     WorkflowPersistenceService,
     NoopWorkflowSnapshotStore,
 
@@ -66,6 +69,10 @@ import { WorkflowPersistenceService } from './workflow-persistence.service';
       provide: WORKFLOW_SNAPSHOT_STORE,
       useExisting: TypeOrmWorkflowSnapshotStore,
     },
+    {
+      provide: WORKFLOW_SCHEDULE_STORE,
+      useExisting: TypeOrmWorkflowScheduleStore,
+    },
   ],
 
   exports: [
@@ -78,6 +85,7 @@ import { WorkflowPersistenceService } from './workflow-persistence.service';
     WORKFLOW_TRANSACTION_RUNNER,
     WORKFLOW_QUERY_STORE,
     WORKFLOW_SNAPSHOT_STORE,
+    WORKFLOW_SCHEDULE_STORE,
   ],
 })
 export class WorkflowDatabasePersistenceModule {}

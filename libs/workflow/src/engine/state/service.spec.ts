@@ -29,6 +29,21 @@ function setup() {
         status: 'cancelled',
       }),
     ),
+    resumeFromSleep: jest.fn(
+      (state: WorkflowExecutionState): WorkflowExecutionState => ({
+        ...state,
+        status: 'running',
+        sleepUntil: undefined,
+      }),
+    ),
+    resumeFromJoin: jest.fn(
+      (state: WorkflowExecutionState): WorkflowExecutionState => ({
+        ...state,
+        status: 'running',
+        joinId: undefined,
+        joinPolicy: undefined,
+      }),
+    ),
   };
   const history = { delete: jest.fn() };
   const signals = { deleteByWorkflowId: jest.fn() };
@@ -65,6 +80,7 @@ function setup() {
     validator,
     registry,
     publisher,
+    transitions,
     transactionRunner,
     leaseService,
     history,
@@ -230,6 +246,81 @@ describe('WorkflowStateService', () => {
       await expect(service.cancel('missing')).rejects.toThrow(
         WorkflowExecutionError,
       );
+    });
+  });
+
+  describe('wake', () => {
+    it('throws when the workflow to wake does not exist', async () => {
+      const { service, store } = setup();
+      store.load.mockResolvedValue(null);
+
+      await expect(service.wake('missing')).rejects.toThrow(
+        WorkflowExecutionError,
+      );
+    });
+
+    it('throws when the workflow is not sleeping', async () => {
+      const { service, store } = setup();
+      store.load.mockResolvedValue(
+        createWorkflowExecutionState({ status: 'running' }),
+      );
+
+      await expect(service.wake('workflow-1')).rejects.toThrow(
+        /cannot be woken from status 'running'/,
+      );
+    });
+
+    it('applies resumeFromSleep and saves the resumed state', async () => {
+      const { service, store, transitions } = setup();
+      const state = createWorkflowExecutionState({
+        status: 'sleeping',
+        sleepUntil: new Date(),
+      });
+      store.load.mockResolvedValue(state);
+
+      const result = await service.wake(state.workflowId);
+
+      expect(transitions.resumeFromSleep).toHaveBeenCalledWith(state);
+      expect(result.status).toBe('running');
+      expect(store.save).toHaveBeenCalled();
+    });
+  });
+
+  describe('resumeJoin', () => {
+    it('throws when the workflow to resume does not exist', async () => {
+      const { service, store } = setup();
+      store.load.mockResolvedValue(null);
+
+      await expect(service.resumeJoin('missing')).rejects.toThrow(
+        WorkflowExecutionError,
+      );
+    });
+
+    it('throws when the workflow is not waiting-children', async () => {
+      const { service, store } = setup();
+      store.load.mockResolvedValue(
+        createWorkflowExecutionState({ status: 'running' }),
+      );
+
+      await expect(service.resumeJoin('workflow-1')).rejects.toThrow(
+        /cannot resume a join from status 'running'/,
+      );
+    });
+
+    it('applies resumeFromJoin and saves the resumed state', async () => {
+      const { service, store, transitions } = setup();
+      const state = createWorkflowExecutionState({
+        status: 'waiting-children',
+        joinId: 'wf-1:step-1:1',
+        joinPolicy: 'all',
+      });
+      store.load.mockResolvedValue(state);
+
+      const result = await service.resumeJoin(state.workflowId);
+
+      expect(transitions.resumeFromJoin).toHaveBeenCalledWith(state);
+      expect(result.status).toBe('running');
+      expect(store.save).toHaveBeenCalled();
     });
   });
 });

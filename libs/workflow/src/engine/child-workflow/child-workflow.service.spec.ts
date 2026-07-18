@@ -12,6 +12,7 @@ function setup(maxRetries = 3) {
     execute: jest.fn(),
     cancel: jest.fn(),
     findByParentWorkflowId: jest.fn(),
+    resumeJoin: jest.fn().mockResolvedValue(undefined),
   };
   const stateService = {
     save: jest.fn(),
@@ -86,6 +87,27 @@ function setup(maxRetries = 3) {
     compensation,
     registeredParent,
   };
+}
+
+function waitingParent(overrides: Partial<WorkflowExecutionState> = {}) {
+  return createWorkflowExecutionState({
+    workflowId: 'parent-1',
+    workflowName: 'parent-workflow',
+    status: 'waiting-children',
+    joinId: 'parent-1:fan-out:1',
+    joinPolicy: 'all',
+    ...overrides,
+  });
+}
+
+function fanOutChild(overrides: Partial<WorkflowExecutionState> = {}) {
+  return createWorkflowExecutionState({
+    workflowId: 'child-1',
+    workflowName: 'child-workflow',
+    joinId: 'parent-1:fan-out:1',
+    status: 'completed',
+    ...overrides,
+  });
 }
 
 describe('ChildWorkflowService', () => {
@@ -301,6 +323,529 @@ describe('ChildWorkflowService', () => {
         {},
         expect.objectContaining({ parentWorkflowId: 'parent-1' }),
       );
+    });
+
+    it('does not auto-start a child declared with trigger: step', async () => {
+      const { service, executor } = setup();
+
+      const workflow = {
+        metadata: {
+          name: 'parent-workflow',
+          version: 1,
+          childWorkflows: [
+            {
+              workflow: ChildWorkflowClass,
+              failurePolicy: 'ignore' as const,
+              cancellationPolicy: 'detach' as const,
+              trigger: 'step' as const,
+            },
+          ],
+        },
+      };
+
+      await service.startChildren(workflow as never, parent);
+
+      expect(executor.execute).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('spawnFanOut', () => {
+    function fanOutWorkflow() {
+      return {
+        metadata: {
+          name: 'parent-workflow',
+          version: 1,
+          childWorkflows: [
+            {
+              workflow: ChildWorkflowClass,
+              failurePolicy: 'ignore' as const,
+              cancellationPolicy: 'detach' as const,
+              trigger: 'step' as const,
+            },
+          ],
+        },
+      };
+    }
+
+    it('spawns one child per spec, tagging each with the parent joinId', async () => {
+      const { service, executor } = setup();
+      executor.execute.mockResolvedValue({
+        workflowId: 'child-1',
+        status: 'running',
+        iteration: 0,
+        data: {},
+      });
+      const parentWaiting = createWorkflowExecutionState({
+        workflowId: 'parent-1',
+        workflowName: 'parent-workflow',
+        status: 'waiting-children',
+        joinId: 'parent-1:fan-out:1',
+      });
+
+      await service.spawnFanOut(fanOutWorkflow() as never, parentWaiting, [
+        { workflow: ChildWorkflowClass, input: { branch: 1 } },
+        { workflow: ChildWorkflowClass, input: { branch: 2 } },
+      ]);
+
+      expect(executor.execute).toHaveBeenCalledTimes(2);
+      expect(executor.execute).toHaveBeenCalledWith(
+        'child-workflow',
+        { branch: 1 },
+        expect.objectContaining({
+          parentWorkflowId: 'parent-1',
+          joinId: 'parent-1:fan-out:1',
+        }),
+      );
+    });
+
+    it('does nothing when specs is empty', async () => {
+      const { service, executor } = setup();
+
+      await service.spawnFanOut(fanOutWorkflow() as never, parent, []);
+
+      expect(executor.execute).not.toHaveBeenCalled();
+    });
+
+    it('fails the parent and cancels siblings when a spec references a workflow class not declared with trigger: step', async () => {
+      const { service, executor, parentFailureHandler } = setup();
+      executor.execute.mockResolvedValue({
+        workflowId: 'child-1',
+        status: 'running',
+        iteration: 0,
+        data: {},
+      });
+
+      const notDeclared = class Undeclared {};
+
+      await service.spawnFanOut(fanOutWorkflow() as never, parent, [
+        { workflow: notDeclared },
+      ]);
+
+      expect(parentFailureHandler.failExecution).toHaveBeenCalledTimes(1);
+    });
+
+    it('cancels already-started siblings when one spawn fails', async () => {
+      const { service, executor, parentFailureHandler } = setup();
+      executor.execute
+        .mockResolvedValueOnce({
+          workflowId: 'child-1',
+          status: 'running',
+          iteration: 0,
+          data: {},
+        })
+        .mockRejectedValueOnce(new Error('boom'));
+
+      await service.spawnFanOut(fanOutWorkflow() as never, parent, [
+        { workflow: ChildWorkflowClass },
+        { workflow: ChildWorkflowClass },
+      ]);
+
+      expect(executor.cancel).toHaveBeenCalledWith('child-1');
+      expect(parentFailureHandler.failExecution).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('onChildCompleted / join quorum', () => {
+    it('does nothing when the parent is not waiting-children', async () => {
+      const { service, stateService, executor } = setup();
+      const runningParent = createWorkflowExecutionState({
+        workflowId: 'parent-1',
+        workflowName: 'parent-workflow',
+        status: 'running',
+      });
+      stateService.load.mockResolvedValue(runningParent);
+
+      await service.onChildCompleted(runningParent, fanOutChild());
+
+      expect(stateService.findByParentWorkflowId).not.toHaveBeenCalled();
+      expect(executor.resumeJoin).not.toHaveBeenCalled();
+    });
+
+    it("does nothing when the completed child's joinId does not match the parent's", async () => {
+      const { service, executor } = setup();
+
+      await service.onChildCompleted(
+        waitingParent(),
+        fanOutChild({ joinId: 'a-different-join' }),
+      );
+
+      expect(executor.resumeJoin).not.toHaveBeenCalled();
+    });
+
+    it("resumes the parent once 'all' siblings have completed", async () => {
+      const { service, stateService, executor } = setup();
+      stateService.load.mockResolvedValue(waitingParent());
+      stateService.findByParentWorkflowId.mockResolvedValue([
+        fanOutChild({ workflowId: 'child-1', status: 'completed' }),
+        fanOutChild({ workflowId: 'child-2', status: 'completed' }),
+      ]);
+
+      await service.onChildCompleted(waitingParent(), fanOutChild());
+
+      expect(executor.resumeJoin).toHaveBeenCalledWith('parent-1');
+    });
+
+    it("does not resume the parent while an 'all' sibling is still running", async () => {
+      const { service, stateService, executor } = setup();
+      stateService.load.mockResolvedValue(waitingParent());
+      stateService.findByParentWorkflowId.mockResolvedValue([
+        fanOutChild({ workflowId: 'child-1', status: 'completed' }),
+        fanOutChild({ workflowId: 'child-2', status: 'running' }),
+      ]);
+
+      await service.onChildCompleted(waitingParent(), fanOutChild());
+
+      expect(executor.resumeJoin).not.toHaveBeenCalled();
+    });
+
+    it("resumes an 'all' join once the last sibling permanently fails via 'ignore' (fixes the deadlock)", async () => {
+      const { service, stateService, executor, registeredParent } = setup();
+      (
+        registeredParent.metadata.childWorkflows[0]! as {
+          failurePolicy: string;
+        }
+      ).failurePolicy = 'ignore';
+      stateService.load.mockResolvedValue(waitingParent());
+      stateService.findByParentWorkflowId.mockResolvedValue([
+        fanOutChild({ workflowId: 'child-1', status: 'completed' }),
+        fanOutChild({ workflowId: 'child-2', status: 'failed' }),
+      ]);
+
+      await service.onChildCompleted(waitingParent(), fanOutChild());
+
+      expect(executor.resumeJoin).toHaveBeenCalledWith('parent-1');
+    });
+
+    it("resumes an 'all' join once every sibling has exhausted its 'retry-child' retries", async () => {
+      const { service, stateService, executor } = setup(2);
+      stateService.load.mockResolvedValue(waitingParent());
+      stateService.findByParentWorkflowId.mockResolvedValue([
+        fanOutChild({ workflowId: 'child-1', status: 'completed' }),
+        fanOutChild({
+          workflowId: 'child-2',
+          status: 'failed',
+          failureCount: 2,
+        }),
+      ]);
+
+      await service.onChildCompleted(waitingParent(), fanOutChild());
+
+      expect(executor.resumeJoin).toHaveBeenCalledWith('parent-1');
+    });
+
+    it("does not resume an 'all' join while a 'retry-child' sibling still has retries left", async () => {
+      const { service, stateService, executor } = setup(3);
+      stateService.load.mockResolvedValue(waitingParent());
+      stateService.findByParentWorkflowId.mockResolvedValue([
+        fanOutChild({ workflowId: 'child-1', status: 'completed' }),
+        fanOutChild({
+          workflowId: 'child-2',
+          status: 'failed',
+          failureCount: 1,
+        }),
+      ]);
+
+      await service.onChildCompleted(waitingParent(), fanOutChild());
+
+      expect(executor.resumeJoin).not.toHaveBeenCalled();
+    });
+
+    it("resumes the parent as soon as one sibling completes under 'any' policy", async () => {
+      const { service, stateService, executor } = setup();
+      stateService.load.mockResolvedValue(waitingParent({ joinPolicy: 'any' }));
+      stateService.findByParentWorkflowId.mockResolvedValue([
+        fanOutChild({ workflowId: 'child-1', status: 'completed' }),
+        fanOutChild({ workflowId: 'child-2', status: 'running' }),
+      ]);
+
+      await service.onChildCompleted(
+        waitingParent({ joinPolicy: 'any' }),
+        fanOutChild(),
+      );
+
+      expect(executor.resumeJoin).toHaveBeenCalledWith('parent-1');
+    });
+
+    it("does not let a permanently-failed sibling satisfy 'any' — only successes count", async () => {
+      const { service, stateService, executor, registeredParent } = setup();
+      (
+        registeredParent.metadata.childWorkflows[0]! as {
+          failurePolicy: string;
+        }
+      ).failurePolicy = 'ignore';
+      stateService.load.mockResolvedValue(waitingParent({ joinPolicy: 'any' }));
+      stateService.findByParentWorkflowId.mockResolvedValue([
+        fanOutChild({ workflowId: 'child-1', status: 'failed' }),
+        fanOutChild({ workflowId: 'child-2', status: 'running' }),
+      ]);
+
+      await service.onChildCompleted(
+        waitingParent({ joinPolicy: 'any' }),
+        fanOutChild({ workflowId: 'child-1', status: 'failed' }),
+      );
+
+      expect(executor.resumeJoin).not.toHaveBeenCalled();
+    });
+
+    it('resumes the parent once the configured minimum count completes', async () => {
+      const { service, stateService, executor } = setup();
+      stateService.load.mockResolvedValue(
+        waitingParent({ joinPolicy: { min: 2 } }),
+      );
+      stateService.findByParentWorkflowId.mockResolvedValue([
+        fanOutChild({ workflowId: 'child-1', status: 'completed' }),
+        fanOutChild({ workflowId: 'child-2', status: 'completed' }),
+        fanOutChild({ workflowId: 'child-3', status: 'running' }),
+      ]);
+
+      await service.onChildCompleted(
+        waitingParent({ joinPolicy: { min: 2 } }),
+        fanOutChild(),
+      );
+
+      expect(executor.resumeJoin).toHaveBeenCalledWith('parent-1');
+    });
+
+    it('does not resume the parent below the configured minimum count', async () => {
+      const { service, stateService, executor } = setup();
+      stateService.load.mockResolvedValue(
+        waitingParent({ joinPolicy: { min: 2 } }),
+      );
+      stateService.findByParentWorkflowId.mockResolvedValue([
+        fanOutChild({ workflowId: 'child-1', status: 'completed' }),
+        fanOutChild({ workflowId: 'child-2', status: 'running' }),
+      ]);
+
+      await service.onChildCompleted(
+        waitingParent({ joinPolicy: { min: 2 } }),
+        fanOutChild(),
+      );
+
+      expect(executor.resumeJoin).not.toHaveBeenCalled();
+    });
+
+    it('resumes once the configured minimum becomes mathematically unreachable', async () => {
+      const { service, stateService, executor, registeredParent } = setup();
+      (
+        registeredParent.metadata.childWorkflows[0]! as {
+          failurePolicy: string;
+        }
+      ).failurePolicy = 'ignore';
+      stateService.load.mockResolvedValue(
+        waitingParent({ joinPolicy: { min: 2 } }),
+      );
+      stateService.findByParentWorkflowId.mockResolvedValue([
+        fanOutChild({ workflowId: 'child-1', status: 'completed' }),
+        fanOutChild({ workflowId: 'child-2', status: 'failed' }),
+        fanOutChild({ workflowId: 'child-3', status: 'failed' }),
+      ]);
+
+      await service.onChildCompleted(
+        waitingParent({ joinPolicy: { min: 2 } }),
+        fanOutChild({ workflowId: 'child-2', status: 'failed' }),
+      );
+
+      expect(executor.resumeJoin).toHaveBeenCalledWith('parent-1');
+    });
+
+    it('does not resume while the configured minimum is still reachable', async () => {
+      const { service, stateService, executor, registeredParent } = setup();
+      (
+        registeredParent.metadata.childWorkflows[0]! as {
+          failurePolicy: string;
+        }
+      ).failurePolicy = 'ignore';
+      stateService.load.mockResolvedValue(
+        waitingParent({ joinPolicy: { min: 2 } }),
+      );
+      stateService.findByParentWorkflowId.mockResolvedValue([
+        fanOutChild({ workflowId: 'child-1', status: 'completed' }),
+        fanOutChild({ workflowId: 'child-2', status: 'running' }),
+        fanOutChild({ workflowId: 'child-3', status: 'failed' }),
+      ]);
+
+      await service.onChildCompleted(
+        waitingParent({ joinPolicy: { min: 2 } }),
+        fanOutChild({ workflowId: 'child-3', status: 'failed' }),
+      );
+
+      expect(executor.resumeJoin).not.toHaveBeenCalled();
+    });
+
+    it("resumes 'any' once its only sibling permanently fails", async () => {
+      const { service, stateService, executor, registeredParent } = setup();
+      (
+        registeredParent.metadata.childWorkflows[0]! as {
+          failurePolicy: string;
+        }
+      ).failurePolicy = 'ignore';
+      stateService.load.mockResolvedValue(waitingParent({ joinPolicy: 'any' }));
+      stateService.findByParentWorkflowId.mockResolvedValue([
+        fanOutChild({ workflowId: 'child-1', status: 'failed' }),
+      ]);
+
+      await service.onChildCompleted(
+        waitingParent({ joinPolicy: 'any' }),
+        fanOutChild({ workflowId: 'child-1', status: 'failed' }),
+      );
+
+      expect(executor.resumeJoin).toHaveBeenCalledWith('parent-1');
+    });
+
+    it('logs rather than throws when resumeJoin fails', async () => {
+      const { service, stateService, executor } = setup();
+      stateService.load.mockResolvedValue(waitingParent());
+      stateService.findByParentWorkflowId.mockResolvedValue([
+        fanOutChild({ workflowId: 'child-1', status: 'completed' }),
+      ]);
+      executor.resumeJoin.mockRejectedValue(new Error('lease held elsewhere'));
+
+      await expect(
+        service.onChildCompleted(waitingParent(), fanOutChild()),
+      ).resolves.toBeUndefined();
+    });
+  });
+
+  describe('summarizeJoin', () => {
+    it('throws when the parent workflow does not exist', async () => {
+      const { service, stateService } = setup();
+      stateService.load.mockResolvedValue(null);
+
+      await expect(service.summarizeJoin('missing', 'join-1')).rejects.toThrow(
+        /not found/,
+      );
+    });
+
+    it('categorizes siblings into succeeded/failed/pending', async () => {
+      const { service, stateService, registeredParent } = setup();
+      (
+        registeredParent.metadata.childWorkflows[0]! as {
+          failurePolicy: string;
+        }
+      ).failurePolicy = 'ignore';
+      stateService.load.mockResolvedValue(waitingParent());
+      stateService.findByParentWorkflowId.mockResolvedValue([
+        fanOutChild({ workflowId: 'child-1', status: 'completed' }),
+        fanOutChild({ workflowId: 'child-2', status: 'failed' }),
+        fanOutChild({ workflowId: 'child-3', status: 'running' }),
+        fanOutChild({ workflowId: 'child-4', joinId: 'a-different-join' }),
+      ]);
+
+      const summary = await service.summarizeJoin(
+        'parent-1',
+        'parent-1:fan-out:1',
+      );
+
+      expect(summary.succeeded.map((s) => s.workflowId)).toEqual(['child-1']);
+      expect(summary.failed.map((s) => s.workflowId)).toEqual(['child-2']);
+      expect(summary.pending.map((s) => s.workflowId)).toEqual(['child-3']);
+    });
+
+    it('treats an unmanaged, non-completed sibling as pending rather than throwing', async () => {
+      const { service, stateService } = setup();
+      stateService.load.mockResolvedValue(waitingParent());
+      stateService.findByParentWorkflowId.mockResolvedValue([
+        createWorkflowExecutionState({
+          workflowId: 'child-1',
+          workflowName: 'unmanaged-workflow',
+          joinId: 'parent-1:fan-out:1',
+          status: 'failed',
+        }),
+      ]);
+
+      const summary = await service.summarizeJoin(
+        'parent-1',
+        'parent-1:fan-out:1',
+      );
+
+      expect(summary.pending.map((s) => s.workflowId)).toEqual(['child-1']);
+    });
+  });
+
+  describe('onChildFailed / join quorum', () => {
+    const joinWaitingParent = createWorkflowExecutionState({
+      workflowId: 'parent-1',
+      workflowName: 'parent-workflow',
+      status: 'waiting-children',
+      joinId: 'parent-1:fan-out:1',
+      joinPolicy: 'all',
+    });
+
+    it("checks join quorum after an 'ignore'-policy child permanently fails", async () => {
+      const { service, stateService, executor, registeredParent } = setup();
+      (
+        registeredParent.metadata.childWorkflows[0]! as {
+          failurePolicy: string;
+        }
+      ).failurePolicy = 'ignore';
+      const failedChild = createWorkflowExecutionState({
+        workflowId: 'child-1',
+        workflowName: 'child-workflow',
+        joinId: 'parent-1:fan-out:1',
+        status: 'failed',
+      });
+      stateService.load.mockResolvedValue(joinWaitingParent);
+      stateService.findByParentWorkflowId.mockResolvedValue([failedChild]);
+
+      await service.onChildFailed(joinWaitingParent, failedChild);
+
+      expect(executor.resumeJoin).toHaveBeenCalledWith('parent-1');
+    });
+
+    it('does not check join quorum for a failed child with no joinId (not part of a fan-out)', async () => {
+      const { service, stateService, executor, registeredParent } = setup();
+      (
+        registeredParent.metadata.childWorkflows[0]! as {
+          failurePolicy: string;
+        }
+      ).failurePolicy = 'ignore';
+      const failedChild = createWorkflowExecutionState({
+        workflowId: 'child-1',
+        workflowName: 'child-workflow',
+        status: 'failed',
+      });
+
+      await service.onChildFailed(joinWaitingParent, failedChild);
+
+      expect(stateService.load).not.toHaveBeenCalled();
+      expect(executor.resumeJoin).not.toHaveBeenCalled();
+    });
+
+    it("checks join quorum once a 'retry-child' sibling exhausts its retries", async () => {
+      const { service, stateService, executor } = setup(1);
+      const exhaustedChild = createWorkflowExecutionState({
+        workflowId: 'child-1',
+        workflowName: 'child-workflow',
+        joinId: 'parent-1:fan-out:1',
+        status: 'failed',
+        failureCount: 1,
+        lastFailure: { code: 'ERR', message: 'boom', retriable: true },
+      });
+      stateService.load.mockResolvedValue(joinWaitingParent);
+      stateService.findByParentWorkflowId.mockResolvedValue([exhaustedChild]);
+
+      await service.onChildFailed(joinWaitingParent, exhaustedChild);
+
+      expect(executor.resumeJoin).toHaveBeenCalledWith('parent-1');
+    });
+
+    it("does not check join quorum while a 'retry-child' sibling is still being retried", async () => {
+      const { service, stateService, executor } = setup(3);
+      const retryingChild = createWorkflowExecutionState({
+        workflowId: 'child-1',
+        workflowName: 'child-workflow',
+        joinId: 'parent-1:fan-out:1',
+        status: 'failed',
+        failureCount: 1,
+        lastFailure: { code: 'ERR', message: 'boom', retriable: true },
+      });
+      stateService.save.mockResolvedValue(retryingChild);
+      stateService.load.mockResolvedValue(joinWaitingParent);
+      stateService.findByParentWorkflowId.mockResolvedValue([retryingChild]);
+
+      await service.onChildFailed(joinWaitingParent, retryingChild);
+
+      expect(executor.resumeJoin).not.toHaveBeenCalled();
     });
   });
 

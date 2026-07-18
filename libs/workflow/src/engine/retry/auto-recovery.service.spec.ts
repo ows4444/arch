@@ -15,20 +15,28 @@ function setup() {
     findRecoverableExecutions: jest.fn().mockResolvedValue([]),
     findStuckExecutions: jest.fn().mockResolvedValue([]),
     findExpiredWaitingExecutions: jest.fn().mockResolvedValue([]),
+    findSleepingReady: jest.fn().mockResolvedValue([]),
+    findWaitingChildrenExecutions: jest.fn().mockResolvedValue([]),
     markAsRecoverable: jest.fn().mockResolvedValue(undefined),
   };
   const executor = {
     resume: jest.fn().mockResolvedValue(undefined),
     cancel: jest.fn().mockResolvedValue(undefined),
+    wake: jest.fn().mockResolvedValue(undefined),
   };
   const registry = {
     getAll: jest.fn().mockReturnValue([registeredWorkflow('test-workflow')]),
   };
   const scheduler = { addInterval: jest.fn(), deleteInterval: jest.fn() };
+  const children = {
+    checkJoinQuorum: jest.fn().mockResolvedValue(false),
+  };
   const metrics = {
     sweepRecovered: jest.fn(),
     sweepStuckDetected: jest.fn(),
     sweepExpiredCancelled: jest.fn(),
+    sweepSleepWoken: jest.fn(),
+    sweepStuckJoinResumed: jest.fn(),
   };
 
   const service = new WorkflowAutoRecoveryService(
@@ -36,10 +44,19 @@ function setup() {
     executor as never,
     registry as never,
     scheduler as never,
+    children as never,
     metrics as never,
   );
 
-  return { service, recovery, executor, registry, scheduler, metrics };
+  return {
+    service,
+    recovery,
+    executor,
+    registry,
+    scheduler,
+    children,
+    metrics,
+  };
 }
 
 describe('WorkflowAutoRecoveryService.onModuleInit / onModuleDestroy', () => {
@@ -268,5 +285,91 @@ describe('WorkflowAutoRecoveryService.recover', () => {
 
     expect(executor.cancel).toHaveBeenCalledTimes(2);
     expect(metrics.sweepExpiredCancelled).toHaveBeenCalledWith(1);
+  });
+
+  it('wakes each ready sleeping workflow and reports the count via metrics', async () => {
+    const { service, recovery, executor, metrics } = setup();
+    recovery.findSleepingReady.mockResolvedValue([
+      createWorkflowExecutionState({
+        workflowId: 'wf-1',
+        workflowName: 'test-workflow',
+        sleepUntil: new Date(Date.now() - 1000),
+      }),
+    ]);
+
+    await service.recover();
+
+    expect(executor.wake).toHaveBeenCalledWith('wf-1');
+    expect(metrics.sweepSleepWoken).toHaveBeenCalledWith(1);
+  });
+
+  it('continues the sweep when waking one sleeping workflow throws', async () => {
+    const { service, recovery, executor, metrics } = setup();
+    recovery.findSleepingReady.mockResolvedValue([
+      createWorkflowExecutionState({ workflowId: 'wf-1' }),
+      createWorkflowExecutionState({ workflowId: 'wf-2' }),
+    ]);
+    executor.wake
+      .mockRejectedValueOnce(new Error('boom'))
+      .mockResolvedValueOnce(undefined);
+
+    await service.recover();
+
+    expect(executor.wake).toHaveBeenCalledTimes(2);
+    expect(metrics.sweepSleepWoken).toHaveBeenCalledWith(1);
+  });
+
+  it('re-checks join quorum for each waiting-children workflow and reports the count when it resumes', async () => {
+    const { service, recovery, children, metrics } = setup();
+    recovery.findWaitingChildrenExecutions.mockResolvedValue([
+      createWorkflowExecutionState({
+        workflowId: 'wf-1',
+        status: 'waiting-children',
+        joinId: 'wf-1:fan-out:1',
+      }),
+    ]);
+    children.checkJoinQuorum.mockResolvedValue(true);
+
+    await service.recover();
+
+    expect(children.checkJoinQuorum).toHaveBeenCalledWith('wf-1');
+    expect(metrics.sweepStuckJoinResumed).toHaveBeenCalledWith(1);
+  });
+
+  it('does not count a re-check whose quorum is still unmet', async () => {
+    const { service, recovery, children, metrics } = setup();
+    recovery.findWaitingChildrenExecutions.mockResolvedValue([
+      createWorkflowExecutionState({
+        workflowId: 'wf-1',
+        status: 'waiting-children',
+      }),
+    ]);
+    children.checkJoinQuorum.mockResolvedValue(false);
+
+    await service.recover();
+
+    expect(metrics.sweepStuckJoinResumed).toHaveBeenCalledWith(0);
+  });
+
+  it('continues the sweep when re-checking one join throws', async () => {
+    const { service, recovery, children, metrics } = setup();
+    recovery.findWaitingChildrenExecutions.mockResolvedValue([
+      createWorkflowExecutionState({
+        workflowId: 'wf-1',
+        status: 'waiting-children',
+      }),
+      createWorkflowExecutionState({
+        workflowId: 'wf-2',
+        status: 'waiting-children',
+      }),
+    ]);
+    children.checkJoinQuorum
+      .mockRejectedValueOnce(new Error('boom'))
+      .mockResolvedValueOnce(true);
+
+    await service.recover();
+
+    expect(children.checkJoinQuorum).toHaveBeenCalledTimes(2);
+    expect(metrics.sweepStuckJoinResumed).toHaveBeenCalledWith(1);
   });
 });

@@ -72,6 +72,16 @@ export class WorkflowRecoveryService {
     return (await this.store.findWaitingExpired?.(timeoutMs, limit)) ?? [];
   }
 
+  async findSleepingReady(limit?: number): Promise<WorkflowExecutionState[]> {
+    return (await this.store.findSleepingReady?.(new Date(), limit)) ?? [];
+  }
+
+  async findWaitingChildrenExecutions(
+    limit?: number,
+  ): Promise<WorkflowExecutionState[]> {
+    return (await this.store.findWaitingChildren?.(limit)) ?? [];
+  }
+
   async markAsRecoverable(workflowId: string): Promise<void> {
     const state = await this.store.load(workflowId);
 

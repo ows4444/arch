@@ -121,6 +121,99 @@ describe('WorkflowStateValidator', () => {
     });
   });
 
+  describe('sleeping', () => {
+    const sleepingBase = () =>
+      createWorkflowExecutionState({
+        status: 'sleeping',
+        currentStep: undefined,
+        sleepUntil: new Date(),
+        resumeStep: createWorkflowStepId('step-2'),
+      });
+
+    it('accepts a well-formed sleeping state', () => {
+      expect(() => validator.validate(sleepingBase())).not.toThrow();
+    });
+
+    it('rejects sleeping without sleepUntil', () => {
+      const state = { ...sleepingBase(), sleepUntil: undefined };
+
+      expect(() => validator.validate(state)).toThrow(/missing sleepUntil/);
+    });
+
+    it('rejects sleeping without a resume step', () => {
+      const state = { ...sleepingBase(), resumeStep: undefined };
+
+      expect(() => validator.validate(state)).toThrow(/no resume step/);
+    });
+
+    it('rejects sleeping while still executing a step', () => {
+      const state = {
+        ...sleepingBase(),
+        executingStep: createWorkflowStepId('step-1'),
+      };
+
+      expect(() => validator.validate(state)).toThrow(/still executing step/);
+    });
+
+    it('rejects sleeping while also waiting for a signal', () => {
+      const state = {
+        ...sleepingBase(),
+        waitingForSignal: { name: 'approval', signalId: 'signal-1' },
+      };
+
+      expect(() => validator.validate(state)).toThrow(
+        /cannot also wait for a signal/,
+      );
+    });
+  });
+
+  describe('waiting-children', () => {
+    const waitingChildrenBase = () =>
+      createWorkflowExecutionState({
+        status: 'waiting-children',
+        currentStep: undefined,
+        joinId: 'wf-1:step-1:1',
+        joinPolicy: 'all',
+        resumeStep: createWorkflowStepId('join-step'),
+      });
+
+    it('accepts a well-formed waiting-children state', () => {
+      expect(() => validator.validate(waitingChildrenBase())).not.toThrow();
+    });
+
+    it('rejects waiting-children without joinId', () => {
+      const state = { ...waitingChildrenBase(), joinId: undefined };
+
+      expect(() => validator.validate(state)).toThrow(/missing joinId/);
+    });
+
+    it('rejects waiting-children without a resume step', () => {
+      const state = { ...waitingChildrenBase(), resumeStep: undefined };
+
+      expect(() => validator.validate(state)).toThrow(/no resume step/);
+    });
+
+    it('rejects waiting-children while still executing a step', () => {
+      const state = {
+        ...waitingChildrenBase(),
+        executingStep: createWorkflowStepId('step-1'),
+      };
+
+      expect(() => validator.validate(state)).toThrow(/still executing step/);
+    });
+
+    it('rejects waiting-children while also waiting for a signal', () => {
+      const state = {
+        ...waitingChildrenBase(),
+        waitingForSignal: { name: 'approval', signalId: 'signal-1' },
+      };
+
+      expect(() => validator.validate(state)).toThrow(
+        /cannot also wait for a signal/,
+      );
+    });
+  });
+
   describe('completed', () => {
     const completedBase = () =>
       createWorkflowExecutionState({

@@ -26,6 +26,8 @@ export interface WorkflowExecutionOptions {
   readonly correlationId?: string;
   readonly parentWorkflowId?: string;
   readonly parentExecutionId?: string;
+  readonly workflowVersion?: number | undefined;
+  readonly joinId?: string | undefined;
 }
 
 @Injectable()
@@ -105,6 +107,78 @@ export class WorkflowExecutor {
           const reloadedState =
             (await this.stateService.load(workflowId)) ?? state;
           await this.failureService.failExecution(reloadedState, error);
+          failed = true;
+          pendingError = error;
+          return undefined;
+        }
+
+        return await this.finalize(finalState);
+      });
+
+      if (failed) {
+        throw pendingError;
+      }
+
+      return outcome as WorkflowExecutionResult;
+    });
+  }
+
+  async wake(workflowId: string): Promise<WorkflowExecutionResult> {
+    return this.withLease(workflowId, async () => {
+      let pendingError: unknown;
+      let failed = false;
+
+      const outcome = await this.transactionRunner.executeOrJoin(async () => {
+        const state = await this.stateService.wake(workflowId);
+        const workflow = this.getDefinition(
+          state.workflowName,
+          state.workflowVersion,
+        );
+
+        let finalState: WorkflowExecutionState;
+
+        try {
+          finalState = await this.runner.run(workflow, state);
+        } catch (error) {
+          const reloadedState =
+            (await this.stateService.load(workflowId)) ?? state;
+          await this.failureService.handleFailure(reloadedState, error);
+          failed = true;
+          pendingError = error;
+          return undefined;
+        }
+
+        return await this.finalize(finalState);
+      });
+
+      if (failed) {
+        throw pendingError;
+      }
+
+      return outcome as WorkflowExecutionResult;
+    });
+  }
+
+  async resumeJoin(workflowId: string): Promise<WorkflowExecutionResult> {
+    return this.withLease(workflowId, async () => {
+      let pendingError: unknown;
+      let failed = false;
+
+      const outcome = await this.transactionRunner.executeOrJoin(async () => {
+        const state = await this.stateService.resumeJoin(workflowId);
+        const workflow = this.getDefinition(
+          state.workflowName,
+          state.workflowVersion,
+        );
+
+        let finalState: WorkflowExecutionState;
+
+        try {
+          finalState = await this.runner.run(workflow, state);
+        } catch (error) {
+          const reloadedState =
+            (await this.stateService.load(workflowId)) ?? state;
+          await this.failureService.handleFailure(reloadedState, error);
           failed = true;
           pendingError = error;
           return undefined;

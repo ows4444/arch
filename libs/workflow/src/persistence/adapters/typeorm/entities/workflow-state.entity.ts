@@ -1,10 +1,13 @@
 import { Column, Entity, Index, PrimaryColumn } from 'typeorm';
 import type { WorkflowExecutionState } from '../../../../models/workflow-execution-state';
 import type { WorkflowFailure } from '../../../../models/workflow-failure';
+import type { WorkflowJoinPolicy } from '../../../../models/workflow-join-policy';
 import type { WorkflowSignal } from '../../../../models/workflow-signal';
 import type { WorkflowStatus } from '../../../../types/workflow-status';
 
 @Index(['status', 'waitingSince'])
+@Index(['status', 'sleepUntil'])
+@Index(['parentWorkflowId', 'joinId'])
 @Index(['status'])
 @Index(['status', 'stepStartedAt'])
 @Index(['status', 'completedAt'])
@@ -73,6 +76,18 @@ export class WorkflowStateEntity {
     nullable: true,
   })
   waitingSince?: Date | null;
+
+  @Column({
+    type: 'datetime',
+    nullable: true,
+  })
+  sleepUntil?: Date | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  joinId?: string | null;
+
+  @Column({ type: 'json', nullable: true })
+  joinPolicy?: WorkflowJoinPolicy | null;
 
   @Column()
   iteration!: number;

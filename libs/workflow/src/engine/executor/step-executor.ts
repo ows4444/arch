@@ -1,4 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
+import { ChildWorkflowService } from '../child-workflow/child-workflow.service';
 import { WorkflowRetryDelayService } from '../retry/delay.service';
 import { WorkflowStateService } from '../state/service';
 import { WorkflowStepResultValidator } from '../validation/step-result.validator';
@@ -43,6 +44,7 @@ export class WorkflowStepExecutor {
     private readonly stateService: WorkflowStateService,
     private readonly leaseService: WorkflowLeaseService,
     private readonly persistence: WorkflowStepPersistenceService,
+    private readonly children: ChildWorkflowService,
   ) {}
 
   async execute(
@@ -89,6 +91,12 @@ export class WorkflowStepExecutor {
 
             return this.stateService.isCancelled(state.workflowId);
           },
+          ...(state.joinId
+            ? {
+                joinResults: () =>
+                  this.children.summarizeJoin(state.workflowId, state.joinId!),
+              }
+            : {}),
         },
       };
 

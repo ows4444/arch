@@ -30,6 +30,12 @@ export class WorkflowStateMapper {
           | QueryDeepPartialEntity<WorkflowStateEntity>['waitingForSignal']
           | undefined) ?? null,
       waitingSince: state.waitingSince ?? null,
+      sleepUntil: state.sleepUntil ?? null,
+      joinId: state.joinId ?? null,
+      joinPolicy:
+        (state.joinPolicy as
+          | QueryDeepPartialEntity<WorkflowStateEntity>['joinPolicy']
+          | undefined) ?? null,
       iteration: state.iteration,
       failureCount: state.failureCount ?? null,
       requiresRecovery: state.requiresRecovery ?? null,
@@ -77,6 +83,9 @@ export class WorkflowStateMapper {
       stepRetryCount: entity.stepRetryCount ?? undefined,
       waitingForSignal: entity.waitingForSignal ?? undefined,
       waitingSince: entity.waitingSince ?? undefined,
+      sleepUntil: entity.sleepUntil ?? undefined,
+      joinId: entity.joinId ?? undefined,
+      joinPolicy: entity.joinPolicy ?? undefined,
       iteration: entity.iteration,
       failureCount: entity.failureCount ?? undefined,
       requiresRecovery: entity.requiresRecovery ?? undefined,

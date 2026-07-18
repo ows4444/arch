@@ -1,5 +1,6 @@
 import { WorkflowStatus } from '../types/workflow-status';
 import { WorkflowFailure } from './workflow-failure';
+import { WorkflowJoinPolicy } from './workflow-join-policy';
 import { WorkflowSignal } from './workflow-signal';
 import { WorkflowStepId } from './workflow-step-id';
 
@@ -31,6 +32,18 @@ export interface WorkflowExecutionState<
   readonly waitingForSignal?: WorkflowSignal | undefined;
 
   readonly waitingSince?: Date | undefined;
+
+  readonly sleepUntil?: Date | undefined;
+
+  /**
+   * Set on a workflow while `status === 'waiting-children'` (identifies
+   * this fan-out episode) and on each child spawned as part of it (so join
+   * quorum can be scoped to "children from this fan-out," not every child
+   * this execution has ever had).
+   */
+  readonly joinId?: string | undefined;
+
+  readonly joinPolicy?: WorkflowJoinPolicy | undefined;
 
   readonly resumeStep?: WorkflowStepId | undefined;
 
