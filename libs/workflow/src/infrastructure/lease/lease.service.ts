@@ -117,6 +117,8 @@ export class WorkflowLeaseService implements OnApplicationShutdown {
       });
     }, intervalMs);
 
+    timer.unref();
+
     return () => clearInterval(timer);
   }
 }

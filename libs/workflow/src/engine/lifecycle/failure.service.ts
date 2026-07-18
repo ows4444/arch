@@ -143,7 +143,16 @@ export class WorkflowFailureService {
         }
 
         if (workflow.metadata.compensation?.enabled) {
-          await this.compensation.compensate(workflow, latest);
+          const fullyCompensated = await this.compensation.compensate(
+            workflow,
+            latest,
+          );
+
+          if (!fullyCompensated) {
+            this.opsLogger.error(
+              `Compensation did not fully complete for workflow=${latest.workflowName} workflowId=${latest.workflowId} — one or more steps' compensation handlers failed (see prior 'Compensation failed for step' errors) and will require manual intervention.`,
+            );
+          }
         }
       } catch (schedulingError) {
         this.opsLogger.error(

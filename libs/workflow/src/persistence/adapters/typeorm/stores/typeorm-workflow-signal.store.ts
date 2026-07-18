@@ -18,9 +18,13 @@ export class TypeOrmWorkflowSignalStore implements WorkflowSignalStore {
     return this.managerProvider.manager().getRepository(WorkflowSignalEntity);
   }
 
-  async load(signalId: string): Promise<WorkflowSignalRecord | null> {
+  async load(
+    workflowId: string,
+    signalId: string,
+  ): Promise<WorkflowSignalRecord | null> {
     const entity = await this.repository.findOne({
       where: {
+        workflowId,
         signalId,
       },
     });
@@ -67,17 +71,18 @@ export class TypeOrmWorkflowSignalStore implements WorkflowSignalStore {
     }
   }
 
-  async exists(signalId: string): Promise<boolean> {
+  async exists(workflowId: string, signalId: string): Promise<boolean> {
     return this.repository.exists({
       where: {
+        workflowId,
         signalId,
       },
     });
   }
 
-  async markProcessed(signalId: string): Promise<void> {
+  async markProcessed(workflowId: string, signalId: string): Promise<void> {
     await this.repository.update(
-      { signalId },
+      { workflowId, signalId },
       {
         processed: true,
         processedAt: new Date(),

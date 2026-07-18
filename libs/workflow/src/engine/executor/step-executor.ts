@@ -196,6 +196,8 @@ export class WorkflowStepExecutor {
               ),
             );
           }, timeoutMs);
+
+          timeout.unref();
         }),
       ]);
     } finally {

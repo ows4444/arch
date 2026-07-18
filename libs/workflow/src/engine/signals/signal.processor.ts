@@ -107,7 +107,20 @@ export class WorkflowSignalProcessor {
       return { state, acquired: false };
     }
 
-    await this.signals.append(workflowId, signal);
+    const appended = await this.signals.append(workflowId, signal);
+
+    if (!appended) {
+      // The idempotency store just granted this signalId for this workflow,
+      // so a duplicate-key hit here means the signal row already exists
+      // outside the idempotency store's bookkeeping (e.g. a prior attempt
+      // crashed after the insert but before markCompleted). Treat it as
+      // already-recorded rather than re-processing.
+      this.logger.warn(
+        `Signal '${signal.signalId}' for workflow '${workflowId}' was already recorded; skipping re-append.`,
+      );
+
+      return { state, acquired: false };
+    }
 
     if (state.status !== 'waiting') {
       return { state, acquired: true };
@@ -125,13 +138,13 @@ export class WorkflowSignalProcessor {
   }
 
   async complete(workflowId: string, signalId: string): Promise<void> {
-    const existing = await this.signals.load(signalId);
+    const existing = await this.signals.load(workflowId, signalId);
 
     if (existing?.processed) {
       return;
     }
 
-    await this.signals.markProcessed(signalId);
+    await this.signals.markProcessed(workflowId, signalId);
 
     await this.idempotency.markCompleted(
       buildSignalIdempotencyKey(workflowId, signalId),

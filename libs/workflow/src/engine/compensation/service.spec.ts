@@ -8,12 +8,14 @@ class StepBHandler {}
 function setup() {
   const history = { findByWorkflowId: jest.fn() };
   const resolver = { resolveCompensation: jest.fn() };
+  const metrics = { compensationFailed: jest.fn() };
   const service = new WorkflowCompensationService(
     history as never,
     resolver as never,
+    metrics as never,
   );
 
-  return { service, history, resolver };
+  return { service, history, resolver, metrics };
 }
 
 function step(id: string, handlerType: unknown) {
@@ -49,7 +51,9 @@ describe('WorkflowCompensationService', () => {
       ]),
     };
 
-    await service.compensate(workflow as never, state);
+    await expect(service.compensate(workflow as never, state)).resolves.toBe(
+      true,
+    );
 
     expect(order).toEqual(['step-b', 'step-a']);
   });
@@ -71,8 +75,8 @@ describe('WorkflowCompensationService', () => {
     expect(resolver.resolveCompensation).not.toHaveBeenCalled();
   });
 
-  it('continues compensating remaining steps when one handler throws', async () => {
-    const { service, history, resolver } = setup();
+  it('continues compensating remaining steps when one handler throws, and reports incomplete compensation', async () => {
+    const { service, history, resolver, metrics } = setup();
     const compensateB = jest.fn().mockResolvedValue(undefined);
 
     history.findByWorkflowId.mockResolvedValue([
@@ -87,18 +91,19 @@ describe('WorkflowCompensationService', () => {
       .mockReturnValueOnce({ compensate: compensateB });
 
     const workflow = {
-      metadata: { compensation: { strategy: 'reverse-order' } },
+      metadata: { name: 'wf', compensation: { strategy: 'reverse-order' } },
       steps: new Map([
         ['step-a', step('step-a', StepAHandler)],
         ['step-b', step('step-b', StepBHandler)],
       ]),
     };
 
-    await expect(
-      service.compensate(workflow as never, state),
-    ).resolves.toBeUndefined();
+    await expect(service.compensate(workflow as never, state)).resolves.toBe(
+      false,
+    );
 
     expect(compensateB).toHaveBeenCalledTimes(1);
+    expect(metrics.compensationFailed).toHaveBeenCalledWith('wf', 'step-b');
   });
 
   it('follows the declared custom order and ignores steps missing from history', async () => {
@@ -168,6 +173,19 @@ describe('WorkflowCompensationService', () => {
     expect(compensateB).toHaveBeenCalledTimes(1);
 
     jest.useRealTimers();
+  });
+
+  it('returns false and skips compensation for an unrecognized strategy', async () => {
+    const { service } = setup();
+
+    const workflow = {
+      metadata: { name: 'wf', compensation: { strategy: 'bogus' } },
+      steps: new Map(),
+    };
+
+    await expect(service.compensate(workflow as never, state)).resolves.toBe(
+      false,
+    );
   });
 
   it('throws when custom strategy is selected without a compensation order', async () => {

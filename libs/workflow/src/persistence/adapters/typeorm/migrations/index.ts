@@ -1,7 +1,10 @@
 import { InitialWorkflowSchema1752000000000 } from './1752000000000-InitialWorkflowSchema.migration';
+import { WorkflowSignalCompositeKey1752200000000 } from './1752200000000-WorkflowSignalCompositeKey.migration';
 
 export const WORKFLOW_MIGRATIONS = [
   InitialWorkflowSchema1752000000000,
+  WorkflowSignalCompositeKey1752200000000,
 ] as const;
 
 export { InitialWorkflowSchema1752000000000 } from './1752000000000-InitialWorkflowSchema.migration';
+export { WorkflowSignalCompositeKey1752200000000 } from './1752200000000-WorkflowSignalCompositeKey.migration';

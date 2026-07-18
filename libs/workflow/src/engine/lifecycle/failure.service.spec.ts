@@ -27,7 +27,7 @@ function setup() {
     canRetry: jest.fn().mockReturnValue(false),
     retry: jest.fn(),
   };
-  const compensation = { compensate: jest.fn() };
+  const compensation = { compensate: jest.fn().mockResolvedValue(true) };
   const registry = {
     get: jest.fn().mockReturnValue({ metadata: { name: 'test-workflow' } }),
   };
@@ -187,6 +187,32 @@ describe('WorkflowFailureService', () => {
       await getAfterCommitCallback()?.();
 
       expect(compensation.compensate).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not throw when compensation reports it did not fully complete', async () => {
+      const {
+        service,
+        registry,
+        retryService,
+        compensation,
+        getAfterCommitCallback,
+      } = setup();
+      registry.get.mockReturnValue({
+        metadata: {
+          name: 'test-workflow',
+          compensation: { enabled: true },
+        },
+      });
+      retryService.canRetry.mockReturnValue(false);
+      compensation.compensate.mockResolvedValue(false);
+
+      const state = createWorkflowExecutionState({
+        executingStep: createWorkflowStepId('step-1'),
+      });
+
+      await service.failExecution(state, new Error('boom'));
+
+      await expect(getAfterCommitCallback()?.()).resolves.toBeUndefined();
     });
 
     it('does not let a post-commit failure escape as an unhandled rejection', async () => {

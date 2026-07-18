@@ -1,10 +1,21 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { WorkflowStepResolver } from '../executor/step-resolver';
 import { RegisteredWorkflow } from '../../models/registered-workflow';
 import { WorkflowExecutionState } from '../../models/workflow-execution-state';
 import { WorkflowHistoryService } from '../../persistence/history.service';
 import { WorkflowStepExecution } from '../../models/workflow-step-execution';
 import { DEFAULT_COMPENSATION_STEP_TIMEOUT_MS } from '../../constants/workflow.constants';
+import { WORKFLOW_METRICS } from '../../constants/workflow.tokens';
+import type { WorkflowMetrics } from '../../models/workflow-metrics';
+
+/**
+ * `true` when every completed step with a compensation handler was rolled
+ * back successfully; `false` when at least one handler threw/timed out (see
+ * `WorkflowMetrics.compensationFailed`) or the workflow's compensation
+ * strategy was unrecognized/misconfigured — in either case, compensation
+ * continues best-effort through the remaining steps rather than aborting.
+ */
+export type CompensationOutcome = boolean;
 
 @Injectable()
 export class WorkflowCompensationService {
@@ -13,12 +24,15 @@ export class WorkflowCompensationService {
   constructor(
     private readonly history: WorkflowHistoryService,
     private readonly resolver: WorkflowStepResolver,
+
+    @Inject(WORKFLOW_METRICS)
+    private readonly metrics: WorkflowMetrics,
   ) {}
 
   async compensate(
     workflow: RegisteredWorkflow,
     state: WorkflowExecutionState,
-  ): Promise<void> {
+  ): Promise<CompensationOutcome> {
     const strategy =
       workflow.metadata.compensation?.strategy ?? 'reverse-order';
 
@@ -35,13 +49,14 @@ export class WorkflowCompensationService {
             `strategy '${String(strategy)}'; compensation was skipped.`,
         );
         strategy satisfies never;
+        return false;
     }
   }
 
   private async compensateCustom(
     workflow: RegisteredWorkflow,
     state: WorkflowExecutionState,
-  ): Promise<void> {
+  ): Promise<CompensationOutcome> {
     const order = workflow.metadata.compensation?.order;
 
     if (!order?.length) {
@@ -62,27 +77,29 @@ export class WorkflowCompensationService {
       .map((stepId) => executionMap.get(stepId))
       .filter((execution) => execution !== undefined);
 
-    await this.compensateSteps(workflow, state, orderedSteps);
+    return this.compensateSteps(workflow, state, orderedSteps);
   }
 
   private async compensateReverseOrder(
     workflow: RegisteredWorkflow,
     state: WorkflowExecutionState,
-  ): Promise<void> {
+  ): Promise<CompensationOutcome> {
     const history = await this.history.findByWorkflowId(state.workflowId);
 
     const orderedSteps = [...history]
       .filter((execution) => execution.status === 'completed')
       .reverse();
 
-    await this.compensateSteps(workflow, state, orderedSteps);
+    return this.compensateSteps(workflow, state, orderedSteps);
   }
 
   private async compensateSteps(
     workflow: RegisteredWorkflow,
     state: WorkflowExecutionState,
     orderedSteps: readonly WorkflowStepExecution[],
-  ): Promise<void> {
+  ): Promise<CompensationOutcome> {
+    let fullyCompensated = true;
+
     for (const execution of orderedSteps) {
       const step = workflow.steps.get(execution.step);
 
@@ -113,12 +130,21 @@ export class WorkflowCompensationService {
           DEFAULT_COMPENSATION_STEP_TIMEOUT_MS,
         );
       } catch (error) {
+        fullyCompensated = false;
+
+        this.metrics.compensationFailed?.(
+          workflow.metadata.name,
+          execution.step,
+        );
+
         this.logger.error(
           `Compensation failed for step '${execution.step}'`,
           error instanceof Error ? error.stack : String(error),
         );
       }
     }
+
+    return fullyCompensated;
   }
 
   private async compensateWithTimeout(
@@ -146,6 +172,8 @@ export class WorkflowCompensationService {
               new Error(`Compensation handler timed out after ${timeoutMs}ms`),
             );
           }, timeoutMs);
+
+          timeout.unref();
         }),
       ]);
     } finally {

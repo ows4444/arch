@@ -40,10 +40,39 @@ describe('TypeOrmWorkflowSignalStore', () => {
     await expect(store.insert(record())).resolves.toBe(true);
   });
 
-  it('returns false rather than throwing on a duplicate signalId', async () => {
+  it('returns false rather than throwing on a duplicate (workflowId, signalId)', async () => {
     await store.insert(record());
 
     await expect(store.insert(record())).resolves.toBe(false);
+  });
+
+  it('allows two different workflows to reuse the same caller-chosen signalId (regression)', async () => {
+    await expect(
+      store.insert(record({ workflowId: 'wf-1', signalId: 'approve' })),
+    ).resolves.toBe(true);
+    await expect(
+      store.insert(record({ workflowId: 'wf-2', signalId: 'approve' })),
+    ).resolves.toBe(true);
+
+    const wf1Signal = await store.load('wf-1', 'approve');
+    const wf2Signal = await store.load('wf-2', 'approve');
+
+    expect(wf1Signal?.workflowId).toBe('wf-1');
+    expect(wf2Signal?.workflowId).toBe('wf-2');
+  });
+
+  it("marking one workflow's signal processed does not affect another workflow sharing the same signalId (regression)", async () => {
+    await store.insert(record({ workflowId: 'wf-1', signalId: 'approve' }));
+    await store.insert(record({ workflowId: 'wf-2', signalId: 'approve' }));
+
+    await store.markProcessed('wf-1', 'approve');
+
+    await expect(store.load('wf-1', 'approve')).resolves.toMatchObject({
+      processed: true,
+    });
+    await expect(store.load('wf-2', 'approve')).resolves.toMatchObject({
+      processed: false,
+    });
   });
 
   it('round-trips a signal through load', async () => {
@@ -57,14 +86,14 @@ describe('TypeOrmWorkflowSignalStore', () => {
       }),
     );
 
-    const loaded = await store.load('signal-1');
+    const loaded = await store.load('wf-1', 'signal-1');
 
     expect(loaded?.signal.name).toBe('approval');
     expect(loaded?.signal.payload).toEqual({ ok: true });
   });
 
   it('returns null when the signal does not exist', async () => {
-    await expect(store.load('missing')).resolves.toBeNull();
+    await expect(store.load('wf-1', 'missing')).resolves.toBeNull();
   });
 
   it('reports pending (unprocessed) signals for a workflow in creation order', async () => {
@@ -80,7 +109,7 @@ describe('TypeOrmWorkflowSignalStore', () => {
         createdAt: new Date('2026-01-01T00:01:00.000Z'),
       }),
     );
-    await store.markProcessed('signal-1');
+    await store.markProcessed('wf-1', 'signal-1');
 
     const pending = await store.findPending('wf-1');
 
@@ -90,9 +119,9 @@ describe('TypeOrmWorkflowSignalStore', () => {
   it('marks a signal processed', async () => {
     await store.insert(record());
 
-    await store.markProcessed('signal-1');
+    await store.markProcessed('wf-1', 'signal-1');
 
-    const loaded = await store.load('signal-1');
+    const loaded = await store.load('wf-1', 'signal-1');
     expect(loaded?.processed).toBe(true);
     expect(loaded?.processedAt).toBeInstanceOf(Date);
   });
@@ -103,7 +132,7 @@ describe('TypeOrmWorkflowSignalStore', () => {
 
     await store.deleteByWorkflowId('wf-1');
 
-    await expect(store.exists('signal-1')).resolves.toBe(false);
-    await expect(store.exists('signal-2')).resolves.toBe(true);
+    await expect(store.exists('wf-1', 'signal-1')).resolves.toBe(false);
+    await expect(store.exists('wf-2', 'signal-2')).resolves.toBe(true);
   });
 });

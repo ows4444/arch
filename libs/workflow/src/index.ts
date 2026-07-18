@@ -32,6 +32,7 @@ export {
 export {
   WORKFLOW_MIGRATIONS,
   InitialWorkflowSchema1752000000000,
+  WorkflowSignalCompositeKey1752200000000,
 } from './persistence/adapters/typeorm/migrations/index';
 
 /*

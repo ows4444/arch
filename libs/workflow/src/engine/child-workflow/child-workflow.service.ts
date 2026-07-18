@@ -273,7 +273,19 @@ export class ChildWorkflowService {
           return;
         }
 
-        await this.compensation.compensate(parentWorkflow, parent);
+        const fullyCompensated = await this.compensation.compensate(
+          parentWorkflow,
+          parent,
+        );
+
+        if (!fullyCompensated) {
+          this.logger.error(
+            `Compensation did not fully complete for parent '${parent.workflowId}' ` +
+              `after child '${child.workflowId}' failure — one or more steps' ` +
+              `compensation handlers failed and will require manual intervention.`,
+          );
+        }
+
         await this.failParent(parent, child, true);
         return;
       }

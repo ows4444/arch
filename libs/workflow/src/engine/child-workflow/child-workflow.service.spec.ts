@@ -18,7 +18,7 @@ function setup(maxRetries = 3) {
     findByParentWorkflowId: jest.fn(),
     load: jest.fn(),
   };
-  const compensation = { compensate: jest.fn() };
+  const compensation = { compensate: jest.fn().mockResolvedValue(true) };
   const transitions = {
     resetForRetry: jest.fn(
       (state: WorkflowExecutionState): WorkflowExecutionState => ({
@@ -83,6 +83,8 @@ function setup(maxRetries = 3) {
     retryDelay,
     retryJitter,
     retryScheduler,
+    compensation,
+    registeredParent,
   };
 }
 
@@ -192,6 +194,80 @@ describe('ChildWorkflowService', () => {
     await service.onChildFailed(parent, child);
 
     expect(stateService.save).not.toHaveBeenCalled();
+  });
+
+  describe('compensate-parent policy', () => {
+    it('compensates and fails the parent when a child fails', async () => {
+      const { service, compensation, parentFailureHandler, registeredParent } =
+        setup();
+      (
+        registeredParent.metadata.childWorkflows[0]! as {
+          failurePolicy: string;
+        }
+      ).failurePolicy = 'compensate-parent';
+
+      const child = createWorkflowExecutionState({
+        workflowId: 'child-1',
+        workflowName: 'child-workflow',
+        status: 'failed',
+      });
+
+      await service.onChildFailed(parent, child);
+
+      expect(compensation.compensate).toHaveBeenCalledWith(
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+        expect.objectContaining({ metadata: expect.any(Object) }),
+        parent,
+      );
+      expect(parentFailureHandler.failExecution).toHaveBeenCalledTimes(1);
+    });
+
+    it('still fails the parent even when compensation does not fully complete', async () => {
+      const { service, compensation, parentFailureHandler, registeredParent } =
+        setup();
+      (
+        registeredParent.metadata.childWorkflows[0]! as {
+          failurePolicy: string;
+        }
+      ).failurePolicy = 'compensate-parent';
+      compensation.compensate.mockResolvedValue(false);
+
+      const child = createWorkflowExecutionState({
+        workflowId: 'child-1',
+        workflowName: 'child-workflow',
+        status: 'failed',
+      });
+
+      await expect(
+        service.onChildFailed(parent, child),
+      ).resolves.toBeUndefined();
+
+      expect(parentFailureHandler.failExecution).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not compensate when the parent is already terminal', async () => {
+      const { service, compensation, registeredParent } = setup();
+      (
+        registeredParent.metadata.childWorkflows[0]! as {
+          failurePolicy: string;
+        }
+      ).failurePolicy = 'compensate-parent';
+
+      const terminalParent = createWorkflowExecutionState({
+        workflowId: 'parent-1',
+        workflowName: 'parent-workflow',
+        status: 'completed',
+      });
+      const child = createWorkflowExecutionState({
+        workflowId: 'child-1',
+        workflowName: 'child-workflow',
+        status: 'failed',
+      });
+
+      await service.onChildFailed(terminalParent, child);
+
+      expect(compensation.compensate).not.toHaveBeenCalled();
+    });
   });
 
   describe('startChildren', () => {

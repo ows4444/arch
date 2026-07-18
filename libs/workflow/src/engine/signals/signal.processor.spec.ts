@@ -9,7 +9,7 @@ function setup() {
     markCompleted: jest.fn(),
   };
   const signals = {
-    append: jest.fn(),
+    append: jest.fn().mockResolvedValue(true),
     load: jest.fn(),
     markProcessed: jest.fn(),
     pending: jest.fn(),
@@ -136,6 +136,22 @@ describe('WorkflowSignalProcessor', () => {
       expect(result.acquired).toBe(true);
     });
 
+    it('returns acquired=false without resuming when the signal row was already recorded (regression)', async () => {
+      const { processor, states, signals, transitions } = setup();
+      states.load.mockResolvedValue(
+        createWorkflowExecutionState({
+          status: 'waiting',
+          waitingForSignal: signal,
+        }),
+      );
+      signals.append.mockResolvedValue(false);
+
+      const result = await processor.prepare('workflow-1', signal);
+
+      expect(result.acquired).toBe(false);
+      expect(transitions.resumeFromSignal).not.toHaveBeenCalled();
+    });
+
     it('throws when a waiting workflow receives a signal it is not waiting for', async () => {
       const { processor, states } = setup();
       states.load.mockResolvedValue(
@@ -183,7 +199,10 @@ describe('WorkflowSignalProcessor', () => {
 
       await processor.complete('workflow-1', 'signal-1');
 
-      expect(signals.markProcessed).toHaveBeenCalledWith('signal-1');
+      expect(signals.markProcessed).toHaveBeenCalledWith(
+        'workflow-1',
+        'signal-1',
+      );
       expect(idempotency.markCompleted).toHaveBeenCalledWith(
         expect.stringContaining('signal-1'),
         'workflow-1',

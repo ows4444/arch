@@ -14,6 +14,8 @@ export class DefaultWorkflowRetryScheduler implements WorkflowRetryScheduler {
         resolve();
       }, delayMs);
 
+      timer.unref();
+
       const onAbort = () => {
         clearTimeout(timer);
         signal?.removeEventListener('abort', onAbort);

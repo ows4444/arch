@@ -46,7 +46,6 @@ import { WorkflowQueryService } from './api/workflow-query.service';
 import { NoopWorkflowArchiveStore } from '../retention/noop-archive.store';
 import { ChildWorkflowService } from '../engine/child-workflow/child-workflow.service';
 import { ScheduleModule } from '@nestjs/schedule';
-import { WorkflowExpirationService } from '../engine/expiration/workflow-expiration.service';
 import { NoopWorkflowEventPublisher } from '../observability/noop-event.publisher';
 import { WorkflowPersistenceModule } from '../persistence/workflow-persistence.module';
 import { WorkflowDatabasePersistenceModule } from '../persistence/workflow-database-persistence.module';
@@ -70,7 +69,6 @@ const BASE_PROVIDERS: Provider[] = [
   DefaultWorkflowRetryJitterService,
   DefaultWorkflowRetryScheduler,
   NoopWorkflowArchiveStore,
-  WorkflowExpirationService,
 
   {
     provide: WORKFLOW_ARCHIVE_STORE,
@@ -160,7 +158,6 @@ function moduleExportsFor(backend: WorkflowPersistenceBackend) {
     WORKFLOW_PARENT_FAILURE_HANDLER,
     WORKFLOW_METRICS,
     WorkflowRecoveryService,
-    WorkflowExpirationService,
   ];
 }
 

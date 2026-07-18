@@ -11,12 +11,12 @@ export class WorkflowSignalService {
     private readonly store: WorkflowSignalStore,
   ) {}
 
-  async load(signalId: string) {
-    return this.store.load(signalId);
+  async load(workflowId: string, signalId: string) {
+    return this.store.load(workflowId, signalId);
   }
 
-  async exists(signalId: string): Promise<boolean> {
-    return this.store.exists(signalId);
+  async exists(workflowId: string, signalId: string): Promise<boolean> {
+    return this.store.exists(workflowId, signalId);
   }
 
   async append(workflowId: string, signal: WorkflowSignal): Promise<boolean> {
@@ -29,8 +29,8 @@ export class WorkflowSignalService {
     });
   }
 
-  async markProcessed(signalId: string): Promise<void> {
-    await this.store.markProcessed(signalId);
+  async markProcessed(workflowId: string, signalId: string): Promise<void> {
+    await this.store.markProcessed(workflowId, signalId);
   }
 
   async pending(workflowId: string) {

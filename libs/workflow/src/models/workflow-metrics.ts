@@ -19,6 +19,15 @@ export interface WorkflowMetrics {
 
   hookFailed(workflow: string, hook: string): void;
 
+  /**
+   * Optional so existing external `WorkflowMetrics` implementations keep
+   * compiling — fires when a single compensation step handler throws.
+   * Compensation continues with the remaining steps regardless (see
+   * `WorkflowCompensationService`), so this is the only per-step signal
+   * that a saga rollback didn't fully complete.
+   */
+  compensationFailed?(workflowName: string, step: string): void;
+
   sweepRecovered(count: number): void;
 
   sweepStuckDetected(count: number): void;

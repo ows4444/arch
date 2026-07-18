@@ -52,6 +52,8 @@ export class WorkflowAutoRecoveryService
       });
     }, interval);
 
+    timer.unref();
+
     this.scheduler.addInterval(this.timerName, timer);
   }
 

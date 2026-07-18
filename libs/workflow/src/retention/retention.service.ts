@@ -64,6 +64,8 @@ export class WorkflowRetentionService implements OnModuleInit, OnModuleDestroy {
       });
     }, interval);
 
+    timer.unref();
+
     this.scheduler.addInterval(this.timerName, timer);
   }
 
