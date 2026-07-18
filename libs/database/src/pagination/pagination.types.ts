@@ -25,17 +25,3 @@ export interface OffsetPaginationResult<T> {
 
   readonly hasPrevious: boolean;
 }
-
-export interface CursorPaginationRequest {
-  readonly cursor?: string;
-
-  readonly limit?: number;
-}
-
-export interface CursorPaginationResult<T> {
-  readonly items: readonly T[];
-
-  readonly nextCursor?: string;
-
-  readonly hasNext: boolean;
-}

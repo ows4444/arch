@@ -35,13 +35,6 @@ export class RepositoryResolver {
     return this.dataSourceManager.repository(entity, role);
   }
 
-  resolveFromManager<TEntity extends ObjectLiteral>(
-    manager: EntityManager,
-    entity: EntityTarget<TEntity>,
-  ): Repository<TEntity> {
-    return manager.getRepository(entity);
-  }
-
   manager(role: DatabaseRole): EntityManager {
     if (role === DatabaseRole.WRITE && transactionContext.active) {
       return transactionContext.requireManager();
@@ -97,6 +90,16 @@ export class RepositoryResolver {
     return this.dataSourceManager.waitForRecovery(role, maxWaitMs);
   }
 
+  /**
+   * Builds a repository instance bound to a specific `EntityManager` rather
+   * than one resolved from the current role/transaction context —
+   * `BaseRepository`'s own `repository` getter checks `managerOverride`
+   * first. Useful for manually driving a repository against an ad-hoc
+   * manager (e.g. a nested/independent transaction) outside the normal
+   * `@Transactional()`/`runRead`/`runWrite` flow. No current caller in this
+   * repo, but the mechanism it relies on (`managerOverride`) is real and
+   * exercised by `BaseRepository` — this is the only way to set it.
+   */
   scoped<T>(
     repository: RepositoryClass<T>,
     role: DatabaseRole,
