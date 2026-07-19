@@ -536,4 +536,130 @@ PASS
 
 ## Next Loop
 
-- None queued. Next work should come from a concrete new requirement.
+- Closed by Loop 007: Docker became available, so the real-MySQL/Redis/
+  RabbitMQ verification flagged as outstanding was actually done — and
+  found two real bugs neither mocks nor sqlite integration tests caught.
+
+---
+
+# Loop 007
+
+**Library:** libs/auth (+ apps/server wiring)
+**Date:** 2026-07-19
+
+## Goal
+
+Docker became available mid-session (it wasn't in Loop 006). Follow
+through on Loop 006's open item: verify `libs/auth` against real MySQL/
+Redis/RabbitMQ via `make compose-up`, and actually exercise the live HTTP
+endpoints end to end — not just unit/sqlite-integration tests.
+
+## Files Reviewed
+
+- Booted `apps/server` for real (`nest start server`) against
+  docker-composed MySQL/Redis/RabbitMQ.
+- Full HTTP walkthrough via `curl` against every `/auth/*` route:
+  register, login, `/auth/me` (with/without token), refresh, refresh-
+  token reuse (both the stolen token and the one that replaced it),
+  duplicate registration, wrong password, logout, and post-logout access-
+  token rejection via the real Redis-backed denylist.
+
+## Problems Found
+
+**Critical**
+1. **`AuthModule` failed to boot at all.**
+   `UnknownDependenciesException`: `JwtModule.registerAsync({ inject:
+   [AUTH_MODULE_OPTIONS] })` was declared as a nested `imports` entry
+   inside `AuthModule`, but `AUTH_MODULE_OPTIONS` was a provider on
+   `AuthModule` itself. A dynamic module can't inject a token from its
+   *parent* module's own `providers` array — only from its own providers,
+   modules it explicitly imports, or `@Global()` modules. This was
+   invisible to every unit test because none of them went through real
+   Nest module resolution (services were constructed directly with `new
+   Xxx(...)`), and invisible to the sqlite integration test because that
+   test also builds services directly rather than booting `AuthModule`.
+
+2. **`POST /auth/register` returned 500 against real MySQL.**
+   `QueryFailedError: Field 'createdAt' doesn't have a default value`.
+   `UserEntity.createdAt`/`updatedAt` use `@CreateDateColumn`/
+   `@UpdateDateColumn`, which TypeORM expects to have a DB-level default
+   so a bare `.save()` (no explicit timestamp) works — but the hand-
+   written migration defined those columns with no default at all. The
+   sqlite integration test (Loop 006) used `synchronize: true`, which
+   derives the schema straight from the entity decorators, so the
+   migration's own drift from the entity was invisible there.
+
+## Changes Made
+
+1. Added `libs/auth/src/auth-config.module.ts`: a separate `@Global()`
+   `AuthConfigModule` that owns the `AUTH_MODULE_OPTIONS` provider
+   (`forRoot`/`forRootAsync`, moved the `createAsyncOptionsProviders`
+   logic here from `AuthModule`). `AuthModule.forRoot`/`forRootAsync` now
+   import `AuthConfigModule` as a sibling of `JwtModule.register(Async)`
+   instead of declaring `AUTH_MODULE_OPTIONS` inline — both `JwtModule`
+   and `AuthModule`'s own providers can now see it via `@Global()`.
+2. Fixed `1753000000000-InitialAuthSchema.migration.ts`: `auth_users.
+   createdAt` now has `default: 'CURRENT_TIMESTAMP'`; `updatedAt` has
+   `default: 'CURRENT_TIMESTAMP'` + `onUpdate: 'CURRENT_TIMESTAMP'` —
+   matching what `@CreateDateColumn`/`@UpdateDateColumn` actually need at
+   the DB level. (No down-migration in production yet — this is the
+   initial schema, so the fix is to the not-yet-shipped migration itself,
+   not a new migration on top.)
+3. Recreated the local MySQL volume (`docker compose down -v` +
+   `make compose-up`) since the buggy migration had already run once
+   against it; re-verified clean.
+
+## Why
+
+Both bugs are the exact class of thing mocked unit tests and even a
+sqlite-with-`synchronize:true` integration test structurally cannot catch:
+(1) is a real Nest DI *module-graph* wiring bug, invisible unless Nest
+actually resolves the dependency graph; (2) is a *migration-vs-entity
+drift* bug, invisible unless something runs the literal migration SQL
+against a database that enforces column defaults the way MySQL does
+(sqlite's `synchronize: true` sidesteps migrations entirely). This is why
+Loop 006's note ("verify against real MySQL... not yet done") mattered —
+the gap was real, not hypothetical.
+
+## Tests
+
+No new automated tests this loop (this was live/manual HTTP verification,
+not something naturally expressed as a unit test — the bug was "does the
+app boot and serve traffic at all"). Full monorepo suite re-run after the
+fix: 938 tests passing across 117 suites, still no regressions.
+
+## Build
+
+PASS
+
+## Lint
+
+PASS
+
+## Live verification performed (via curl against real infra)
+
+- Register → 201-equivalent, returns only `{id, email}` (no hash leak).
+- Login → real signed JWT (3-part), real opaque refresh token.
+- `/auth/me` with valid token → 200 with decoded claims;
+  without token → 401.
+- Refresh → rotates successfully; reusing the old (already-rotated) token
+  → 401 "reuse detected"; the token that *replaced* it is also dead
+  (whole family revoked) → 401. Confirms Loop 003's atomic-revoke fix
+  holds under a real MySQL conditional `UPDATE`, not just sqlite.
+- Duplicate registration → 409. Wrong password → 401.
+- Logout → 204; the same still-unexpired access token is rejected
+  immediately afterward (401 "revoked") — confirmed the
+  `CacheAccessTokenDenylist` key actually lands in real Redis
+  (`app:auth:denylist:<jti>`, `app:` from the host's cache namespace).
+
+## Remaining TODO
+
+- Unchanged: password reset/email verification, admin-facing role/
+  permission management UI, `apps/server` shutdown-hooks/CORS/Helmet.
+
+## Next Loop
+
+- None queued. `libs/auth` has now been verified at every level this
+  protocol distinguishes: unit (mocked), integration (sqlite, real
+  repositories/services), and live (real MySQL/Redis/RabbitMQ, real HTTP).
+  Next work should come from a concrete new requirement.

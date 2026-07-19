@@ -6,11 +6,8 @@ import {
   AUTH_MODULE_OPTIONS,
   PASSWORD_HASHER,
 } from './auth.constants';
-import type {
-  AuthModuleAsyncOptions,
-  AuthModuleOptions,
-  AuthOptionsFactory,
-} from './auth.types';
+import type { AuthModuleAsyncOptions, AuthModuleOptions } from './auth.types';
+import { AuthConfigModule } from './auth-config.module';
 import { AuthService } from './application/auth.service';
 import { AuthorizationService } from './application/authorization.service';
 import { TokenService } from './application/token.service';
@@ -42,10 +39,12 @@ export class AuthModule {
     return {
       module: AuthModule,
       global: true,
-      imports: [JwtModule.register({ secret: options.jwt.secret })],
+      imports: [
+        AuthConfigModule.forRoot(options),
+        JwtModule.register({ secret: options.jwt.secret }),
+      ],
       controllers: [AuthController],
       providers: [
-        { provide: AUTH_MODULE_OPTIONS, useValue: options },
         ...this.corePortProviders(),
         {
           provide: PASSWORD_HASHER,
@@ -76,7 +75,7 @@ export class AuthModule {
       module: AuthModule,
       global: true,
       imports: [
-        ...(options.imports ?? []),
+        AuthConfigModule.forRootAsync(options),
         JwtModule.registerAsync({
           inject: [AUTH_MODULE_OPTIONS],
           useFactory: (moduleOptions: AuthModuleOptions) => ({
@@ -86,7 +85,6 @@ export class AuthModule {
       ],
       controllers: [AuthController],
       providers: [
-        ...this.createAsyncOptionsProviders(options),
         ...this.corePortProviders(),
         {
           provide: PASSWORD_HASHER,
@@ -136,44 +134,5 @@ export class AuthModule {
       NoopAccessTokenDenylist,
       NoopAuthEventPublisher,
     ];
-  }
-
-  private static createAsyncOptionsProviders(
-    options: AuthModuleAsyncOptions,
-  ): Provider[] {
-    if (options.useFactory) {
-      return [
-        {
-          provide: AUTH_MODULE_OPTIONS,
-          useFactory: options.useFactory,
-          inject: options.inject ?? [],
-        },
-      ];
-    }
-
-    if (options.useExisting) {
-      return [
-        {
-          provide: AUTH_MODULE_OPTIONS,
-          useFactory: (factory: AuthOptionsFactory) =>
-            factory.createAuthOptions(),
-          inject: [options.useExisting],
-        },
-      ];
-    }
-
-    if (options.useClass) {
-      return [
-        options.useClass,
-        {
-          provide: AUTH_MODULE_OPTIONS,
-          useFactory: (factory: AuthOptionsFactory) =>
-            factory.createAuthOptions(),
-          inject: [options.useClass],
-        },
-      ];
-    }
-
-    throw new Error('Invalid AuthModuleAsyncOptions.');
   }
 }

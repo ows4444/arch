@@ -14,8 +14,17 @@ export class InitialAuthSchema1753000000000 implements MigrationInterface {
           { name: 'passwordAlgo', type: 'varchar' },
           { name: 'status', type: 'varchar', default: "'active'" },
           { name: 'emailVerifiedAt', type: 'datetime', isNullable: true },
-          { name: 'createdAt', type: 'datetime' },
-          { name: 'updatedAt', type: 'datetime' },
+          {
+            name: 'createdAt',
+            type: 'datetime',
+            default: 'CURRENT_TIMESTAMP',
+          },
+          {
+            name: 'updatedAt',
+            type: 'datetime',
+            default: 'CURRENT_TIMESTAMP',
+            onUpdate: 'CURRENT_TIMESTAMP',
+          },
         ],
       }),
     );
