@@ -663,3 +663,127 @@ PASS
   protocol distinguishes: unit (mocked), integration (sqlite, real
   repositories/services), and live (real MySQL/Redis/RabbitMQ, real HTTP).
   Next work should come from a concrete new requirement.
+
+---
+
+# Loop 008
+
+**Library:** libs/auth
+**Date:** 2026-07-19
+
+## Goal
+
+Concrete new requirement: expose `AuthorizationService`'s RBAC operations
+over HTTP. Previously the biggest usable-today gap — `assignRole`/
+`hasPermission` existed but had zero HTTP surface, so nothing outside a
+direct service call could actually manage roles.
+
+## Files Reviewed
+
+- `guards/permissions.guard.ts` / `guards/roles.guard.ts` — found they
+  checked the `permissions`/`roles` claims embedded in the access token at
+  login time, not a live DB read via `AuthorizationService`.
+- `libs/auth/ARCH.md`, Key Decisions MEDIUM #2 — the design already
+  stated the intended rationale for RBAC as plain entities instead of
+  JWT claims: "keeps permission changes effective immediately (a
+  JWT-embedded claim would be stale until the token's next refresh)."
+  The guards just hadn't been wired to match that intent.
+
+## Problems Found
+
+**High**
+- `PermissionsGuard`/`RolesGuard` trusted the JWT's embedded
+  `permissions`/`roles` claims rather than calling
+  `AuthorizationService.hasPermission`/(new) `hasRole`. This meant a role
+  or permission granted after a user's last login/refresh had **no
+  effect** until they got a new token — directly contradicting
+  `ARCH.md`'s own stated design rationale, and something that would have
+  made the new RBAC management endpoints confusing in practice ("I
+  granted the role, why is it still 403?").
+
+## Changes Made
+
+1. Added `PermissionRepository` (`domain/permission.repository.ts`,
+   `findByName`/`findByNames`).
+2. Extended `AuthorizationService`: `createPermission`, `createRole`
+   (validates every referenced permission exists first),
+   `listRoles`, `revokeRole`, `hasRole` — alongside the existing
+   `assignRole`/`hasPermission`/`assertPermission`. `assignRole`/
+   `revokeRole` now throw `UserNotFoundError`/`RoleNotFoundError`
+   instead of silently no-op'ing on an unknown user/role (silent success
+   is misleading for an HTTP-exposed operation).
+3. Fixed `PermissionsGuard`/`RolesGuard` to call
+   `AuthorizationService.hasPermission`/`hasRole` (a live DB read) per
+   request, instead of trusting the token's embedded claims. The token
+   still carries `roles`/`permissions` for display purposes (`/auth/me`),
+   but they are no longer the authorization source of truth.
+4. Added `RoleController` (`POST /auth/permissions`, `POST /auth/roles`,
+   `GET /auth/roles`, `POST`/`DELETE /auth/users/:userId/roles/:roleName`),
+   every route gated by `@Permissions('roles:manage')`.
+5. Added migration `1753100000000-SeedRolesManagePermission`: seeds the
+   `roles:manage` permission and an `admin` role granting it.
+   Deliberately does **not** auto-assign `admin` to anyone (e.g. "first
+   registered user becomes admin") — that would be a real security
+   decision made silently. Bootstrapping the first admin is a documented
+   manual/ops step (direct SQL or `AuthorizationService.assignRole`).
+6. New error types: `RoleAlreadyExistsError`, `PermissionAlreadyExistsError`,
+   `PermissionNotFoundError`, `RoleNotFoundError`, `UserNotFoundError`.
+7. New DTOs: `CreateRoleDto`, `CreatePermissionDto`,
+   `RoleResponseDto`, `PermissionResponseDto` (with Swagger annotations,
+   consistent with the existing `AuthController` DTOs).
+
+## Why
+
+See Problems Found — the guard fix isn't new scope, it's making the code
+match a decision `ARCH.md` already made. The bootstrap-via-migration
+(not auto-admin) choice follows the same "no silent security decisions"
+principle applied throughout this library (e.g. `ACCESS_TOKEN_DENYLIST`'s
+explicit no-op default, refresh-token reuse detection).
+
+## Tests
+
+15 new/changed tests (`authorization.service.spec.ts` expanded to 19
+cases, `permissions.guard.spec.ts`/`roles.guard.spec.ts` rewritten for
+live checks, new `role.controller.spec.ts`, `auth.integration.spec.ts`
+gained a full create-permission→create-role→assign→check→revoke case
+against real sqlite tables). Full monorepo suite: 958 tests passing
+across 118 suites, no regressions.
+
+## Build
+
+PASS
+
+## Lint
+
+PASS
+
+## Live verification performed (real MySQL/Redis/RabbitMQ)
+
+- Confirmed the seed migration ran and `roles:manage`/`admin` exist in
+  real MySQL after a fresh boot.
+- Registered an admin user, manually bootstrapped it via direct SQL
+  (the documented ops step), logged in, and drove the entire RBAC surface
+  live: `GET /auth/roles`, `POST /auth/permissions` (+ 409 on duplicate),
+  `POST /auth/roles` (+ 400 on a role referencing an unknown permission),
+  `POST`/`DELETE /auth/users/:userId/roles/:roleName` (+ 404 on an
+  unknown role), unauthenticated access (401).
+- **The decisive test**: logged in a second user with no role (JWT
+  `permissions` claim `[]`), confirmed `GET /auth/roles` was 403 for
+  them, then — using the *admin's* session — granted that exact user the
+  `admin` role, and replayed the *same, already-issued, untouched* first
+  user's access token against `GET /auth/roles` again: 200, immediately.
+  Then revoked the role and replayed the same old token once more: back
+  to 403, immediately. Confirms the guard fix actually delivers "changes
+  effective immediately" rather than just compiling.
+
+## Remaining TODO
+
+- Unchanged: password reset/email verification, `apps/server`
+  shutdown-hooks/CORS/Helmet (noted, out of scope).
+- No endpoint to delete a role/permission or list a single user's roles —
+  kept the surface to what's needed for management, not full CRUD; add if
+  a concrete need for deletion/listing-by-user shows up.
+
+## Next Loop
+
+- None queued. Next work should come from a concrete new requirement.

@@ -19,6 +19,7 @@ import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { PermissionsGuard } from './guards/permissions.guard';
 import { RolesGuard } from './guards/roles.guard';
 import { AuthController } from './http/auth.controller';
+import { RoleController } from './http/role.controller';
 
 const CORE_EXPORTS = [
   AuthService,
@@ -43,7 +44,7 @@ export class AuthModule {
         AuthConfigModule.forRoot(options),
         JwtModule.register({ secret: options.jwt.secret }),
       ],
-      controllers: [AuthController],
+      controllers: [AuthController, RoleController],
       providers: [
         ...this.corePortProviders(),
         {
@@ -83,7 +84,7 @@ export class AuthModule {
           }),
         }),
       ],
-      controllers: [AuthController],
+      controllers: [AuthController, RoleController],
       providers: [
         ...this.corePortProviders(),
         {

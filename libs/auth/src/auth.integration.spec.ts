@@ -5,6 +5,7 @@ import { DatabaseRole, RepositoryResolver } from '@/database';
 type DataSourceManager = ConstructorParameters<typeof RepositoryResolver>[0];
 import { UserRepository } from './domain/user.repository';
 import { RoleRepository } from './domain/role.repository';
+import { PermissionRepository } from './domain/permission.repository';
 import { RefreshTokenRepository } from './domain/refresh-token.repository';
 import { AUTH_TYPEORM_ENTITIES } from './persistence/entities';
 import { AuthService } from './application/auth.service';
@@ -30,6 +31,7 @@ describe('libs/auth integration (real DataSource)', () => {
   let dataSource: DataSource;
   let userRepo: UserRepository;
   let roleRepo: RoleRepository;
+  let permissionRepo: PermissionRepository;
   let refreshTokenRepo: RefreshTokenRepository;
   let authService: AuthService;
   let authorizationService: AuthorizationService;
@@ -54,6 +56,7 @@ describe('libs/auth integration (real DataSource)', () => {
 
     userRepo = new UserRepository(DatabaseRole.WRITE, resolver);
     roleRepo = new RoleRepository(DatabaseRole.WRITE, resolver);
+    permissionRepo = new PermissionRepository(DatabaseRole.WRITE, resolver);
     refreshTokenRepo = new RefreshTokenRepository(DatabaseRole.WRITE, resolver);
 
     const options: AuthModuleOptions = {
@@ -80,7 +83,11 @@ describe('libs/auth integration (real DataSource)', () => {
       events,
       denylist,
     );
-    authorizationService = new AuthorizationService(userRepo, roleRepo);
+    authorizationService = new AuthorizationService(
+      userRepo,
+      roleRepo,
+      permissionRepo,
+    );
   });
 
   afterEach(async () => {
@@ -132,6 +139,34 @@ describe('libs/auth integration (real DataSource)', () => {
 
     const reloaded = await userRepo.findByEmail('carol@example.com');
     expect(reloaded?.roles.map((role) => role.name)).toEqual(['admin']);
+  });
+
+  it('full RBAC management flow: create permission+role, assign, check, revoke — all against real tables', async () => {
+    await authService.register({
+      email: 'frank@example.com',
+      password: 'correct-horse-battery-staple',
+    });
+    const user = await userRepo.findByEmail('frank@example.com');
+
+    await authorizationService.createPermission('roles:manage', 'Manage roles');
+    await authorizationService.createRole('admin', ['roles:manage']);
+    await authorizationService.assignRole(user!.id, 'admin');
+
+    expect(
+      await authorizationService.hasPermission(user!.id, 'roles:manage'),
+    ).toBe(true);
+    expect(await authorizationService.hasRole(user!.id, 'admin')).toBe(true);
+
+    const roles = await authorizationService.listRoles();
+    expect(roles).toHaveLength(1);
+    expect(roles[0]?.permissions.map((p) => p.name)).toEqual(['roles:manage']);
+
+    await authorizationService.revokeRole(user!.id, 'admin');
+
+    expect(await authorizationService.hasRole(user!.id, 'admin')).toBe(false);
+    expect(
+      await authorizationService.hasPermission(user!.id, 'roles:manage'),
+    ).toBe(false);
   });
 
   it('rotates a refresh token exactly once, then rejects reuse of the old one', async () => {

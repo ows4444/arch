@@ -37,6 +37,7 @@ export * from './adapters/noop-auth-event-publisher';
  * HTTP
  */
 export * from './http/auth.controller';
+export * from './http/role.controller';
 
 /*
  * Guards & decorators
@@ -58,6 +59,10 @@ export * from './dto/refresh.dto';
 export * from './dto/register-response.dto';
 export * from './dto/auth-session-response.dto';
 export * from './dto/authenticated-user-response.dto';
+export * from './dto/create-role.dto';
+export * from './dto/create-permission.dto';
+export * from './dto/role-response.dto';
+export * from './dto/permission-response.dto';
 
 /*
  * Domain
@@ -69,6 +74,7 @@ export * from './domain/refresh-token.entity';
 export * from './domain/user-status.enum';
 export * from './domain/user.repository';
 export * from './domain/role.repository';
+export * from './domain/permission.repository';
 export * from './domain/refresh-token.repository';
 
 /*
@@ -80,6 +86,11 @@ export * from './errors/token-revoked.error';
 export * from './errors/insufficient-permissions.error';
 export * from './errors/insufficient-role.error';
 export * from './errors/email-already-registered.error';
+export * from './errors/role-already-exists.error';
+export * from './errors/permission-already-exists.error';
+export * from './errors/permission-not-found.error';
+export * from './errors/role-not-found.error';
+export * from './errors/user-not-found.error';
 
 /*
  * Config
