@@ -438,4 +438,102 @@ PASS
 
 ## Next Loop
 
+- Closed by Loop 006: real-database integration coverage (everything
+  before this was mocked).
+
+---
+
+# Loop 006
+
+**Library:** libs/auth
+**Date:** 2026-07-19
+
+## Goal
+
+Close a verification gap: every test up to this point mocked
+`UserRepository`/`RoleRepository`/`RefreshTokenRepository`, so nothing had
+actually exercised TypeORM's many-to-many RBAC persistence or the atomic
+`revokeIfActive` conditional `UPDATE` (added in Loop 003 specifically to
+fix a race) against a real database engine. Docker wasn't available in
+this environment to test against real MySQL, so this uses the same
+`better-sqlite3` in-memory pattern already established in
+`libs/workflow`/`libs/database` for exactly this purpose.
+
+## Files Reviewed
+
+- `libs/workflow/src/testing/typeorm-test-datasource.ts` and
+  `.../1752000000000-InitialWorkflowSchema.migration.spec.ts` — the
+  existing sqlite-migration-integration-test pattern.
+- `libs/database/src/transaction/transaction-hooks.integration.spec.ts` —
+  pattern for wrapping a real `DataSource` in a minimal fake
+  `DataSourceManager` to exercise `RepositoryResolver`/`BaseRepository`
+  for real, without a full Nest DI bootstrap.
+- `libs/database/src/repository/repository-resolver.ts` +
+  `datasource.manager.ts` — confirmed which three methods
+  (`manager`/`dataSource`/`repository`) the happy path actually calls, so
+  the fake only needs to implement those.
+
+## Problems Found
+
+None — this loop added coverage, it didn't find a bug. (Loop 003's
+`revokeIfActive` fix is now verified against a real conditional `UPDATE`
+execution, not just a mocked return value, and it holds.)
+
+## Changes Made
+
+- `persistence/migrations/1753000000000-InitialAuthSchema.migration.spec.ts`:
+  runs the real migration against sqlite, verifies all 6 tables
+  (including both join tables) are created, round-trips a
+  user+role+permission+refresh-token through the actual migrated schema,
+  then verifies `down()` drops everything.
+- `auth.integration.spec.ts`: constructs a real `RepositoryResolver` over
+  a real in-memory `DataSource`, real `UserRepository`/`RoleRepository`/
+  `RefreshTokenRepository`, and real `AuthService`/`AuthorizationService`/
+  `TokenService`/`RefreshTokenService` (real `argon2`, real signed JWTs) —
+  no mocks. Covers: register→login→real-signed-token, wrong-password
+  rejection against a real hash, `AuthorizationService.assignRole`
+  reflected through a real many-to-many reload, and the full
+  rotate-once/reject-reuse/whole-family-revoked sequence end to end.
+- Avoided reaching into `libs/database`'s internals for the fake: since
+  `DataSourceManager` isn't exported from `@/database`'s barrel (correctly
+  — it's not part of the public API), used
+  `ConstructorParameters<typeof RepositoryResolver>[0]` to get the
+  parameter type without an internal import.
+
+## Why
+
+Mocked unit tests can make a broken atomic-update assumption look correct
+(a mock returns whatever you tell it to). The two things this loop
+targeted — many-to-many RBAC persistence and the reuse-detection race fix
+— are exactly the kind of logic where "the mock says it works" and "it
+actually works against the real query planner" can diverge. Running it
+for real removes that risk without needing Docker/MySQL, since TypeORM's
+migration/entity code is dialect-abstracted.
+
+## Tests
+
+6 new tests (1 migration spec, 5 integration spec). Full monorepo suite:
+938 tests passing across 117 suites (no regressions).
+
+## Build
+
+PASS
+
+## Lint
+
+PASS
+
+## Remaining TODO
+
+- Unchanged: password reset/email verification, admin-facing role/
+  permission management UI, `apps/server` shutdown-hooks/CORS/Helmet
+  (noted, out of scope).
+- This loop used sqlite as a MySQL stand-in (dialect-abstracted via
+  TypeORM). If a MySQL-specific behavior ever matters (e.g. collation-
+  sensitive unique constraints on `email`), verify against real MySQL via
+  `make compose-up` — not yet done in this environment since Docker
+  wasn't running.
+
+## Next Loop
+
 - None queued. Next work should come from a concrete new requirement.
