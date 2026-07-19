@@ -55,6 +55,9 @@ export * from './decorators/permissions.decorator';
 export * from './dto/register.dto';
 export * from './dto/login.dto';
 export * from './dto/refresh.dto';
+export * from './dto/register-response.dto';
+export * from './dto/auth-session-response.dto';
+export * from './dto/authenticated-user-response.dto';
 
 /*
  * Domain
