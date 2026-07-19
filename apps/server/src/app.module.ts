@@ -1,7 +1,22 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
+import { plainToInstance } from 'class-transformer';
+import { validateSync } from 'class-validator';
 import Redis from 'ioredis';
-import { CacheModule, CacheModuleOptions } from '@/cache';
+import {
+  AuthModule,
+  AuthModuleOptions,
+  AuthEnvironmentSchema,
+  AUTH_TYPEORM_ENTITIES,
+  AUTH_MIGRATIONS,
+  CacheAccessTokenDenylist,
+} from '@/auth';
+import {
+  CacheModule,
+  CacheModuleOptions,
+  CacheManager,
+  CACHE_MANAGER,
+} from '@/cache';
 import { DatabaseBootstrapOptions, DatabaseModule } from '@/database';
 import { QueueModule, QUEUE_TYPEORM_ENTITIES, QUEUE_MIGRATIONS } from '@/queue';
 import {
@@ -22,17 +37,52 @@ function buildRabbitMqUri(): string {
   return `amqp://${username}:${password}@${host}:${port}`;
 }
 
+/**
+ * `AuthModule` takes its config via `forRootAsync` options rather than
+ * reading `process.env` itself (matching `libs/cache`/`libs/queue`'s
+ * host-supplied-config pattern, not `libs/database`'s internal env
+ * loader) — so validating `AuthEnvironmentSchema` here, once, at startup
+ * is what makes it more than a dead export. Fails fast on a missing or
+ * too-short `AUTH_JWT_SECRET` instead of silently accepting a weak one.
+ */
+function validateAuthEnvironment(): AuthEnvironmentSchema {
+  const config = plainToInstance(AuthEnvironmentSchema, process.env, {
+    enableImplicitConversion: true,
+    excludeExtraneousValues: true,
+  });
+
+  const errors = validateSync(config, { skipMissingProperties: false });
+
+  if (errors.length > 0) {
+    const errorMessages = errors
+      .flatMap((error) =>
+        Object.values(
+          error.constraints ?? { [error.property]: 'Invalid value' },
+        ),
+      )
+      .join('\n- ');
+    throw new Error(`Auth environment validation failed:\n- ${errorMessages}`);
+  }
+
+  return config;
+}
+
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
 
     DatabaseModule.forRoot({
       entities: [
+        ...AUTH_TYPEORM_ENTITIES,
         ...QUEUE_TYPEORM_ENTITIES,
         ...WORKFLOW_TYPEORM_ENTITIES,
       ] as unknown as DatabaseBootstrapOptions['entities'],
 
-      migrations: [...QUEUE_MIGRATIONS, ...WORKFLOW_MIGRATIONS],
+      migrations: [
+        ...AUTH_MIGRATIONS,
+        ...QUEUE_MIGRATIONS,
+        ...WORKFLOW_MIGRATIONS,
+      ],
     }),
 
     CacheModule.forRootAsync({
@@ -79,6 +129,30 @@ function buildRabbitMqUri(): string {
     }),
 
     WorkflowModule.forRoot({ persistence: 'database' }),
+
+    AuthModule.forRootAsync({
+      useFactory: (...args: readonly unknown[]): AuthModuleOptions => {
+        const cacheManager = args[0] as CacheManager;
+        const env = validateAuthEnvironment();
+
+        return {
+          jwt: {
+            secret: env.AUTH_JWT_SECRET,
+            ...(env.AUTH_ACCESS_TOKEN_TTL_SECONDS !== undefined && {
+              accessTokenTtlSeconds: env.AUTH_ACCESS_TOKEN_TTL_SECONDS,
+            }),
+          },
+          ...(env.AUTH_REFRESH_TOKEN_TTL_SECONDS !== undefined && {
+            refreshTokenTtlSeconds: env.AUTH_REFRESH_TOKEN_TTL_SECONDS,
+          }),
+          // Instant access-token revocation on logout/password change,
+          // instead of relying solely on the access token's own short
+          // natural expiry (see libs/auth/ARCH.md, Key Decisions MEDIUM #3).
+          accessTokenDenylist: new CacheAccessTokenDenylist(cacheManager),
+        };
+      },
+      inject: [CACHE_MANAGER],
+    }),
   ],
   controllers: [AppController],
   providers: [AppService],

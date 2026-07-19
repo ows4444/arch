@@ -17,6 +17,15 @@
         "tsConfigPath": "apps/server/tsconfig.app.json"
       }
     },
+    "auth": {
+      "type": "library",
+      "root": "libs/auth",
+      "entryFile": "index",
+      "sourceRoot": "libs/auth/src",
+      "compilerOptions": {
+        "tsConfigPath": "libs/auth/tsconfig.lib.json"
+      }
+    },
     "cache": {
       "type": "library",
       "root": "libs/cache",

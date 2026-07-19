@@ -26,6 +26,12 @@
     "noUncheckedIndexedAccess": true,
     "noFallthroughCasesInSwitch": true,
     "paths": {
+      "@/auth": [
+        "libs/auth/src"
+      ],
+      "@/auth/*": [
+        "libs/auth/src/*"
+      ],
       "@/cache": [
         "libs/cache/src"
       ],
