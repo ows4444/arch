@@ -55,6 +55,12 @@
       ],
       "@/workflow/*": [
         "libs/workflow/src/*"
+      ],
+      "@/validation": [
+        "libs/validation/src"
+      ],
+      "@/validation/*": [
+        "libs/validation/src/*"
       ]
     }
   }

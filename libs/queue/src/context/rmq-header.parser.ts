@@ -1,32 +1,37 @@
-import { plainToInstance } from 'class-transformer';
-import { validateSync } from 'class-validator';
+import {
+  ClassValidatorSpecification,
+  ClassValidatorSpecificationError,
+} from '@/validation';
 import { NonRetryableMessageError } from '../errors/non-retryable-message.error';
 import { RMQ_HEADERS } from '../queue.constants';
 import { parseIntegerHeader } from '../utils/header-utils';
-import { formatValidationErrors } from '../utils/validation-errors';
 import { RMQHeadersDto } from './rmq-headers.dto';
+
+const HEADERS_SPECIFICATION = new ClassValidatorSpecification(RMQHeadersDto, {
+  whitelist: true,
+  forbidNonWhitelisted: false,
+  forbidUnknownValues: true,
+});
 
 export class RMQHeaderParser {
   static parse(headers: Record<string, unknown>): RMQHeadersDto {
-    const dto = plainToInstance(RMQHeadersDto, {
+    const candidate = {
       requestId: headers[RMQ_HEADERS.REQUEST_ID],
       correlationId: headers[RMQ_HEADERS.CORRELATION_ID],
       causationId: headers[RMQ_HEADERS.CAUSATION_ID],
       retryCount: parseIntegerHeader(headers[RMQ_HEADERS.RETRY_COUNT]),
-    });
+    };
 
-    const errors = validateSync(dto, {
-      whitelist: true,
-      forbidNonWhitelisted: false,
-      forbidUnknownValues: true,
-    });
+    try {
+      return HEADERS_SPECIFICATION.toInstance(candidate);
+    } catch (error) {
+      if (error instanceof ClassValidatorSpecificationError) {
+        throw new NonRetryableMessageError(
+          `Invalid RabbitMQ headers: ${error.messages.join(', ')}`,
+        );
+      }
 
-    if (errors.length === 0) {
-      return dto;
+      throw error;
     }
-
-    throw new NonRetryableMessageError(
-      `Invalid RabbitMQ headers: ${formatValidationErrors(errors)}`,
-    );
   }
 }
