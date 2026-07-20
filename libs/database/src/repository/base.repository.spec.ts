@@ -215,4 +215,26 @@ describe('BaseRepository retry-on-connectivity-error', () => {
 
     expect(resolver.waitForRecovery).not.toHaveBeenCalled();
   });
+
+  it('does not retry a read call made on a WRITE-role repository inside an active transaction, since it resolves to the same dead transactional manager', async () => {
+    const failingRepository = {
+      find: jest.fn().mockRejectedValue(connectivityError()),
+    };
+    const resolver = {
+      resolve: jest.fn().mockReturnValue(failingRepository),
+      peekReadState: jest.fn().mockReturnValue(undefined),
+      reportFailure: jest.fn(),
+      waitForRecovery: jest.fn().mockResolvedValue(true),
+    } as unknown as RepositoryResolver;
+
+    const repository = new TestRepository(DatabaseRole.WRITE, resolver);
+    const manager = {} as unknown as EntityManager;
+
+    const result = transactionContext.run(manager, () => repository.find({}));
+
+    await expect(result).rejects.toThrow(/active transaction was in progress/);
+
+    expect(resolver.waitForRecovery).not.toHaveBeenCalled();
+    expect(failingRepository.find).toHaveBeenCalledTimes(1);
+  });
 });

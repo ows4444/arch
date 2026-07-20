@@ -253,3 +253,104 @@ PASS (`npm run lint`)
   respective loops. Further work from here would be a fresh Phase 1/2
   review pass on any of the four, or a Design Mode session if any library's
   scope is being deliberately extended rather than refined.
+
+---
+
+# Loop 004
+
+**Library:** libs/database
+**Date:** 2026-07-20
+
+## Goal
+
+Fresh Phase 1/2 review pass — no backlog was open (Loop 003 closed
+everything), so this was open-ended: re-read the transaction/retry/resolver
+core with an adversarial eye rather than working a known TODO list.
+
+## Files Reviewed
+
+- `repository/base.repository.ts` — `execute()`'s retry-on-connectivity-error
+  path, `findOneForUpdate`/`findOneForShare`/`findOneOptimistic`.
+- `repository/repository-resolver.ts` — how `resolve`/`manager` route
+  WRITE+active-transaction vs. READ+pinned-state vs. plain role lookups.
+- `datasource/datasource.manager.ts` — `performReconnect` (confirmed it
+  replaces `state.dataSource` with a *new* `DataSource` instance rather than
+  mutating the existing one) and `waitForRecoveryForState`.
+- `transaction/transaction.context.ts` — confirmed `active`/`requireManager()`
+  are driven purely by `AsyncLocalStorage` state and are untouched by
+  datasource health/reconnection.
+- `transaction/transaction.executor.ts` — re-verified the `timeoutMs` path
+  (log-and-wait-for-real-completion, not abort) against its own tests;
+  confirmed this is intentional design, not a bug, before moving on.
+- `repository/base.repository.spec.ts` — confirmed no existing test covered
+  a connectivity failure on a read call issued inside an active transaction.
+
+## Problems Found
+
+**Critical**
+- `BaseRepository.execute()`'s automatic retry-after-recovery path did not
+  account for an active `@Transactional()` context. `RepositoryResolver.resolve`
+  ties a WRITE-role repository inside an active transaction to
+  `transactionContext.requireManager()` — a single `EntityManager` fixed for
+  the transaction's lifetime. On a connectivity error, `DataSourceManager`
+  reconnects by replacing `state.dataSource` with a brand-new `DataSource`
+  (`performReconnect` → `factory.recreate`), but never touches the already-
+  bound transactional manager. Since `runRead` always passes
+  `retryOnFailure: true` regardless of role, any read call (`find`,
+  `findOne`, `findOneForUpdate`, etc.) made on a WRITE-role repository
+  inside an active transaction would, on connectivity failure, wait for
+  datasource recovery and then retry — re-resolving the exact same dead
+  manager and failing again (or behaving unpredictably), instead of the
+  clean fail-fast `ServiceUnavailableException` the codebase already gives
+  for the equivalent explicit-manager case. This is exactly the "commit
+  state unknown, don't silently retry" hazard `runWrite`/the explicit-manager
+  branch already protect against — just unguarded for the implicit
+  transactional-manager case. Confirmed via `resolver.ts`/`datasource.manager.ts`
+  reading, not just inspection: no existing test exercised this path.
+
+**High / Medium / Low**
+- (none)
+
+## Changes Made
+
+- `base.repository.ts`: `execute()`'s catch block now checks
+  `this.role === DatabaseRole.WRITE && transactionContext.active` and, if
+  true, fails fast with a new `ServiceUnavailableException` message
+  (transaction outcome unknown, manager cannot be recovered automatically)
+  instead of attempting `waitForRecovery` + retry. Placed alongside the
+  existing `explicitManager` fail-fast branch, same reasoning.
+- `base.repository.spec.ts`: new regression test — a `find()` call on a
+  WRITE-role repository run inside `transactionContext.run(manager, ...)`
+  that hits a connectivity error now asserts `waitForRecovery` is never
+  called and the transaction-specific message is thrown.
+
+## Why
+
+- Matches the library's own established principle (`CLAUDE.md`: "writes are
+  never silently retried, since a write's commit state is unknown") — the
+  gap was that this principle was enforced by role (`runWrite` vs.
+  `runRead`) rather than by "is a transactional manager involved," so a read
+  call inside a transaction fell through the gap.
+
+## Tests
+
+1 new test. `libs/database` suite: 16 suites / 144 tests (up from 143).
+Full monorepo suite: 133 suites / 1040 tests, all passing.
+
+## Build
+
+PASS
+
+## Lint
+
+PASS
+
+## Remaining TODO
+
+- None outstanding for this library.
+
+## Next Loop
+
+- No Critical/High findings remain open. Next loop would be a fresh Phase
+  1/2 pass on `libs/cache`, `libs/queue`, or `libs/workflow`, or a Design
+  Mode session if scope is being deliberately extended.

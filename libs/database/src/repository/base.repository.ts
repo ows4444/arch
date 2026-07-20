@@ -129,6 +129,24 @@ export abstract class BaseRepository<TEntity extends ObjectLiteral> {
         );
       }
 
+      if (this.role === DatabaseRole.WRITE && transactionContext.active) {
+        // Same reasoning as the explicitManager case above: a WRITE-role
+        // repository inside an active @Transactional() resolves to that
+        // transaction's EntityManager regardless of whether this call went
+        // through runRead or runWrite (RepositoryResolver.resolve ties
+        // WRITE+active-transaction to transactionContext.requireManager()).
+        // That manager's connection is what just failed; recovery replaces
+        // the datasource's underlying connection, not this already-bound
+        // manager, so retrying here would just re-resolve the same dead
+        // manager and fail again — and the transaction's overall commit
+        // state is unknown either way, so it must not be silently retried.
+        throw new ServiceUnavailableException(
+          'Database connectivity was lost while an active transaction was in progress. ' +
+            "The transaction's outcome is unknown and its EntityManager cannot be recovered automatically — " +
+            'retry only if the whole transaction is idempotent.',
+        );
+      }
+
       const recovered = pinnedState
         ? await this.resolver.waitForRecovery(this.role, undefined, pinnedState)
         : await this.resolver.waitForRecovery(this.role);
