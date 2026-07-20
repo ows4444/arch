@@ -8,7 +8,12 @@
       "Bash(npm audit *)",
       "Bash(docker compose *)",
       "Bash(docker exec *)",
-      "Bash(npm test *)"
+      "Bash(npm test *)",
+      "Bash(npx prettier *)",
+      "Bash(make check *)",
+      "Bash(docker info *)",
+      "Bash(break)",
+      "Bash(make compose-up *)"
     ]
   }
 }
