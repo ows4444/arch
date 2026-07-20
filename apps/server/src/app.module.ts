@@ -20,6 +20,14 @@ import {
 import { DatabaseBootstrapOptions, DatabaseModule } from '@/database';
 import { QueueModule, QUEUE_TYPEORM_ENTITIES, QUEUE_MIGRATIONS } from '@/queue';
 import {
+  ValidationModule,
+  VALIDATION_TYPEORM_ENTITIES,
+  VALIDATION_MIGRATIONS,
+  DefaultValidationErrorFactory,
+  DatabaseValidationRuleStore,
+  CachedValidationRuleStore,
+} from '@/validation';
+import {
   WorkflowModule,
   WORKFLOW_TYPEORM_ENTITIES,
   WORKFLOW_MIGRATIONS,
@@ -27,6 +35,7 @@ import {
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { IoRedisClientAdapter } from './redis/ioredis-client.adapter';
+import { ValidationRuleController } from './validation-rules/validation-rule.controller';
 
 function buildRabbitMqUri(): string {
   const host = process.env.RABBITMQ_HOST ?? 'localhost';
@@ -71,17 +80,31 @@ function validateAuthEnvironment(): AuthEnvironmentSchema {
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
 
+    ValidationModule.forRootAsync({
+      useFactory: () => new DefaultValidationErrorFactory(),
+      rules: {
+        enabled: true,
+        useFactory: (
+          cacheManager: CacheManager,
+          databaseStore: DatabaseValidationRuleStore,
+        ) => new CachedValidationRuleStore(databaseStore, cacheManager),
+        inject: [CACHE_MANAGER, DatabaseValidationRuleStore],
+      },
+    }),
+
     DatabaseModule.forRoot({
       entities: [
         ...AUTH_TYPEORM_ENTITIES,
         ...QUEUE_TYPEORM_ENTITIES,
         ...WORKFLOW_TYPEORM_ENTITIES,
+        ...VALIDATION_TYPEORM_ENTITIES,
       ] as unknown as DatabaseBootstrapOptions['entities'],
 
       migrations: [
         ...AUTH_MIGRATIONS,
         ...QUEUE_MIGRATIONS,
         ...WORKFLOW_MIGRATIONS,
+        ...VALIDATION_MIGRATIONS,
       ],
     }),
 
@@ -154,7 +177,7 @@ function validateAuthEnvironment(): AuthEnvironmentSchema {
       inject: [CACHE_MANAGER],
     }),
   ],
-  controllers: [AppController],
+  controllers: [AppController, ValidationRuleController],
   providers: [AppService],
 })
 export class AppModule {}
