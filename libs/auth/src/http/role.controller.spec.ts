@@ -8,6 +8,8 @@ describe('RoleController', () => {
       listRoles: jest.fn(),
       assignRole: jest.fn().mockResolvedValue(undefined),
       revokeRole: jest.fn().mockResolvedValue(undefined),
+      grantPermission: jest.fn(),
+      revokePermission: jest.fn(),
     };
     const controller = new RoleController(authorization as never);
 
@@ -47,6 +49,44 @@ describe('RoleController', () => {
     authorization.listRoles.mockResolvedValue([{ id: 'role-1' }]);
 
     await expect(controller.listRoles()).resolves.toEqual([{ id: 'role-1' }]);
+  });
+
+  it('delegates grantPermission with the path params', async () => {
+    const { controller, authorization } = setup();
+    authorization.grantPermission.mockResolvedValue({
+      id: 'role-1',
+      name: 'admin',
+      permissions: [{ id: 'perm-1', name: 'workflow:read' }],
+    });
+
+    const result = await controller.grantPermission('admin', 'workflow:read');
+
+    expect(authorization.grantPermission).toHaveBeenCalledWith(
+      'admin',
+      'workflow:read',
+    );
+    expect(result).toEqual({
+      id: 'role-1',
+      name: 'admin',
+      permissions: [{ id: 'perm-1', name: 'workflow:read' }],
+    });
+  });
+
+  it('delegates revokePermission with the path params', async () => {
+    const { controller, authorization } = setup();
+    authorization.revokePermission.mockResolvedValue({
+      id: 'role-1',
+      name: 'admin',
+      permissions: [],
+    });
+
+    const result = await controller.revokePermission('admin', 'workflow:read');
+
+    expect(authorization.revokePermission).toHaveBeenCalledWith(
+      'admin',
+      'workflow:read',
+    );
+    expect(result).toEqual({ id: 'role-1', name: 'admin', permissions: [] });
   });
 
   it('delegates assignRole with the path params', async () => {

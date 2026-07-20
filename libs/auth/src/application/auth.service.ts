@@ -21,6 +21,7 @@ import { AccountDisabledError } from '../errors/account-disabled.error';
 import { EmailAlreadyRegisteredError } from '../errors/email-already-registered.error';
 import type { RegisterDto } from '../dto/register.dto';
 import type { LoginDto } from '../dto/login.dto';
+import { UniqueEmailSpecification } from '../specifications/unique-email.specification';
 
 export interface AuthSession {
   userId: string;
@@ -51,9 +52,9 @@ export class AuthService {
 
   async register(dto: RegisterDto): Promise<UserEntity> {
     const email = dto.email.toLowerCase();
-    const existing = await this.users.findByEmail(email);
+    const uniqueEmail = new UniqueEmailSpecification(this.users);
 
-    if (existing) {
+    if (!(await uniqueEmail.isSatisfiedBy(email))) {
       throw new EmailAlreadyRegisteredError();
     }
 

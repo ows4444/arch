@@ -11,6 +11,8 @@ import { PermissionAlreadyExistsError } from '../errors/permission-already-exist
 import { PermissionNotFoundError } from '../errors/permission-not-found.error';
 import { RoleNotFoundError } from '../errors/role-not-found.error';
 import { UserNotFoundError } from '../errors/user-not-found.error';
+import { UniqueRoleNameSpecification } from '../specifications/unique-role-name.specification';
+import { UniquePermissionNameSpecification } from '../specifications/unique-permission-name.specification';
 
 @Injectable()
 export class AuthorizationService {
@@ -27,7 +29,9 @@ export class AuthorizationService {
     name: string,
     description?: string,
   ): Promise<PermissionEntity> {
-    if (await this.permissions.findByName(name)) {
+    const uniqueName = new UniquePermissionNameSpecification(this.permissions);
+
+    if (!(await uniqueName.isSatisfiedBy(name))) {
       throw new PermissionAlreadyExistsError(name);
     }
 
@@ -38,7 +42,9 @@ export class AuthorizationService {
     name: string,
     permissionNames: string[] = [],
   ): Promise<RoleEntity> {
-    if (await this.roles.findByName(name)) {
+    const uniqueName = new UniqueRoleNameSpecification(this.roles);
+
+    if (!(await uniqueName.isSatisfiedBy(name))) {
       throw new RoleAlreadyExistsError(name);
     }
 
@@ -59,6 +65,56 @@ export class AuthorizationService {
 
   listRoles(): Promise<RoleEntity[]> {
     return this.roles.find({ relations: { permissions: true } });
+  }
+
+  async grantPermission(
+    roleName: string,
+    permissionName: string,
+  ): Promise<RoleEntity> {
+    const role = await this.roles.findByName(roleName);
+
+    if (!role) {
+      throw new RoleNotFoundError(roleName);
+    }
+
+    const permission = await this.permissions.findByName(permissionName);
+
+    if (!permission) {
+      throw new PermissionNotFoundError(permissionName);
+    }
+
+    if (role.permissions.some((granted) => granted.id === permission.id)) {
+      return role;
+    }
+
+    return this.roles.save({
+      id: role.id,
+      permissions: [...role.permissions, permission],
+    });
+  }
+
+  async revokePermission(
+    roleName: string,
+    permissionName: string,
+  ): Promise<RoleEntity> {
+    const role = await this.roles.findByName(roleName);
+
+    if (!role) {
+      throw new RoleNotFoundError(roleName);
+    }
+
+    const permission = await this.permissions.findByName(permissionName);
+
+    if (!permission) {
+      throw new PermissionNotFoundError(permissionName);
+    }
+
+    return this.roles.save({
+      id: role.id,
+      permissions: role.permissions.filter(
+        (granted) => granted.id !== permission.id,
+      ),
+    });
   }
 
   async assignRole(userId: string, roleName: string): Promise<void> {

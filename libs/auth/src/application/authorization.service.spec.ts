@@ -174,6 +174,118 @@ describe('AuthorizationService', () => {
     });
   });
 
+  describe('grantPermission', () => {
+    it('adds a permission the role does not already have', async () => {
+      const { service, roles, permissions } = setup();
+      roles.findByName.mockResolvedValue({
+        id: 'role-1',
+        name: 'admin',
+        permissions: [],
+      });
+      permissions.findByName.mockResolvedValue({
+        id: 'perm-1',
+        name: 'workflow:read',
+      });
+      roles.save.mockResolvedValue({
+        id: 'role-1',
+        name: 'admin',
+        permissions: [{ id: 'perm-1', name: 'workflow:read' }],
+      });
+
+      await service.grantPermission('admin', 'workflow:read');
+
+      expect(roles.save).toHaveBeenCalledWith({
+        id: 'role-1',
+        permissions: [{ id: 'perm-1', name: 'workflow:read' }],
+      });
+    });
+
+    it('is a no-op if the role already has the permission', async () => {
+      const { service, roles, permissions } = setup();
+      roles.findByName.mockResolvedValue({
+        id: 'role-1',
+        name: 'admin',
+        permissions: [{ id: 'perm-1', name: 'workflow:read' }],
+      });
+      permissions.findByName.mockResolvedValue({
+        id: 'perm-1',
+        name: 'workflow:read',
+      });
+
+      await service.grantPermission('admin', 'workflow:read');
+
+      expect(roles.save).not.toHaveBeenCalled();
+    });
+
+    it('throws for an unknown role', async () => {
+      const { service, roles } = setup();
+      roles.findByName.mockResolvedValue(null);
+
+      await expect(
+        service.grantPermission('ghost', 'workflow:read'),
+      ).rejects.toThrow(RoleNotFoundError);
+    });
+
+    it('throws for an unknown permission', async () => {
+      const { service, roles, permissions } = setup();
+      roles.findByName.mockResolvedValue({
+        id: 'role-1',
+        name: 'admin',
+        permissions: [],
+      });
+      permissions.findByName.mockResolvedValue(null);
+
+      await expect(
+        service.grantPermission('admin', 'ghost:permission'),
+      ).rejects.toThrow(PermissionNotFoundError);
+    });
+  });
+
+  describe('revokePermission', () => {
+    it('removes a permission the role has', async () => {
+      const { service, roles, permissions } = setup();
+      roles.findByName.mockResolvedValue({
+        id: 'role-1',
+        name: 'admin',
+        permissions: [{ id: 'perm-1', name: 'workflow:read' }],
+      });
+      permissions.findByName.mockResolvedValue({
+        id: 'perm-1',
+        name: 'workflow:read',
+      });
+
+      await service.revokePermission('admin', 'workflow:read');
+
+      expect(roles.save).toHaveBeenCalledWith({
+        id: 'role-1',
+        permissions: [],
+      });
+    });
+
+    it('throws for an unknown role', async () => {
+      const { service, roles } = setup();
+      roles.findByName.mockResolvedValue(null);
+
+      await expect(
+        service.revokePermission('ghost', 'workflow:read'),
+      ).rejects.toThrow(RoleNotFoundError);
+    });
+
+    it('throws for an unknown permission', async () => {
+      const { service, roles, permissions } = setup();
+      roles.findByName.mockResolvedValue({
+        id: 'role-1',
+        name: 'admin',
+        permissions: [],
+      });
+      permissions.findByName.mockResolvedValue(null);
+
+      await expect(
+        service.revokePermission('admin', 'ghost:permission'),
+      ).rejects.toThrow(PermissionNotFoundError);
+    });
+  });
+
   describe('assignRole', () => {
     it('adds a role the user does not already have', async () => {
       const { service, users, roles } = setup();

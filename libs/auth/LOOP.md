@@ -787,3 +787,227 @@ PASS
 ## Next Loop
 
 - None queued. Next work should come from a concrete new requirement.
+
+---
+
+# Loop 009
+
+**Library:** libs/auth
+**Date:** 2026-07-20
+
+## Goal
+
+Concrete new requirement (user's explicit request): express role/permission-name uniqueness as an
+async `Specification` (from `@/validation`) instead of the inline
+`if (await repo.findByName(name)) throw ...` checks in `AuthorizationService`. See `ARCH.md`
+Design 002.
+
+## Files Reviewed
+
+- `application/authorization.service.ts` — the two inline uniqueness checks (`createPermission`,
+  `createRole`).
+- `ARCH.md`'s "Engines / Policies / Specifications" section (Design 001) — confirmed this refactor
+  does not reopen the generic-ABAC-engine rejection there: reusing `@/validation`'s existing
+  `Specification` interface for two narrow, already-existing checks is not "a rule engine."
+
+## Problems Found
+
+**Critical / High / Medium / Low**
+- None — this loop only restates existing logic through a different, explicitly requested shape.
+  Per Section 18, this would not have been picked up as an unprompted refactor (the inline checks
+  already satisfied readability/maintainability/correctness).
+
+## Changes Made
+
+- Added `libs/auth/src/specifications/unique-role-name.specification.ts` and
+  `unique-permission-name.specification.ts` — each implements `Specification<string>` from
+  `@/validation`, wrapping the same `repo.findByName` call the inline checks used.
+- `AuthorizationService.createPermission`/`createRole` now construct the relevant Specification
+  and call `isSatisfiedBy` instead of checking `findByName` directly. Same repository calls, same
+  thrown errors (`PermissionAlreadyExistsError`/`RoleAlreadyExistsError`) — behavior unchanged.
+- Appended Design 002 to `ARCH.md`, documenting the new `@/validation` dependency (direct, like
+  `@/database` — not a port like `@/cache`/`@/queue`).
+
+## Why
+
+- Explicit user request, not a discovered defect — `ARCH.md` Design 002's goal section says so
+  directly, and Section 18 backs treating an already-correct inline check as a stated-preference
+  change rather than a bug fix.
+
+## Tests
+
+4 new tests (one spec file per Specification). Full repo suite: 130 suites / 1014 tests passing;
+existing `authorization.service.spec.ts` passed unmodified, confirming behavior parity.
+
+## Build
+
+PASS
+
+## Lint
+
+PASS
+
+## Remaining TODO
+
+- Unchanged from Loop 008.
+
+## Next Loop
+
+- None queued.
+
+---
+
+# Loop 010
+
+**Library:** libs/auth
+**Date:** 2026-07-20
+
+## Goal
+
+Close a gap surfaced during `libs/validation`'s live-testing loop: there was no way to grant an
+existing permission to an existing role over HTTP — only `createRole` grants permissions, and
+only at creation time. Raw SQL was needed during that verification pass.
+
+## Files Reviewed
+
+- `application/authorization.service.ts`'s `assignRole`/`revokeRole` (the pattern to mirror for
+  the role↔user relation, applied here to the role↔permission relation).
+- `errors/role-not-found.error.ts` (`NotFoundException`, 404) vs
+  `errors/permission-not-found.error.ts` (`BadRequestException`, 400) — confirmed these are
+  already different status codes for different reasons (missing role = 404 resource-not-found;
+  referencing a permission that doesn't exist = 400 bad client reference, same semantics
+  `createRole` already uses for its "unknown permission in the list" case).
+
+## Problems Found
+
+**Critical / High**
+- (none)
+
+**Medium**
+- First draft of the new endpoints' Swagger annotations claimed `404` for both the
+  "role not found" and "permission not found" cases. Live-tested against the real server and
+  found the permission-not-found path actually returns `400` (inherited from the existing
+  `PermissionNotFoundError extends BadRequestException`) — corrected the annotations to two
+  separate `@ApiResponse` entries with accurate codes, rather than leave inaccurate docs.
+
+**Low**
+- (none)
+
+## Changes Made
+
+- `AuthorizationService.grantPermission(roleName, permissionName)` /
+  `revokePermission(roleName, permissionName)` — same shape as `assignRole`/`revokeRole`:
+  `RoleNotFoundError` (404) if the role doesn't exist, `PermissionNotFoundError` (400) if the
+  permission doesn't exist, no-op-and-return-unchanged if granting a permission the role already
+  has, `roles.save({ id, permissions: [...] })` otherwise (identical partial-save pattern to how
+  `assignRole` updates `user.roles`).
+- `RoleController`: `POST /auth/roles/:roleName/permissions/:permissionName` (grant),
+  `DELETE /auth/roles/:roleName/permissions/:permissionName` (revoke) — both return the updated
+  `RoleResponseDto`, guarded the same as every other route on this controller
+  (`roles:manage`).
+
+## Why
+
+- User asked to complete this specific open item, flagged during the prior loop's live-testing
+  pass as something that required a manual SQL workaround.
+
+## Tests
+
+9 new tests (4 service-level in `authorization.service.spec.ts`, 2 controller-delegation in
+`role.controller.spec.ts`, covering grant/revoke/no-op/unknown-role/unknown-permission).
+
+## Live verification performed (real MySQL/Redis/RabbitMQ)
+
+- Registered a user, bootstrapped `admin` via SQL, logged in, created a `viewer` role and a
+  `workflow:read` permission via existing endpoints.
+- `POST .../permissions/workflow:read` → granted, returned the role with the permission attached.
+- Repeated the same grant → no-op, same response, confirmed via `roles.save` not being called at
+  the service level too.
+- `POST` against an unknown role → `404`. `POST` against an unknown permission → `400` (this is
+  where the Swagger annotation inaccuracy above was caught).
+- `DELETE .../permissions/workflow:read` → revoked, returned the role with an empty
+  `permissions` array.
+- Cleaned up all test data (role, permission, user, grants) after verification.
+
+## Build
+
+PASS
+
+## Lint
+
+PASS
+
+## Remaining TODO
+
+- Unchanged from Loop 008.
+
+## Next Loop
+
+- None forced.
+
+---
+
+# Loop 011
+
+**Library:** libs/auth
+**Date:** 2026-07-20
+
+## Goal
+
+Investigate whether the `Specification` pattern (Loop 009) should extend to other ad hoc checks
+in `libs/auth`, per the user's request to complete open items.
+
+## Files Reviewed
+
+- `application/auth.service.ts`, `application/authorization.service.ts`,
+  `application/refresh-token.service.ts` — every `if (await ...)` / existence-check call site.
+
+## Problems Found
+
+None — this was an investigation, not a review pass.
+
+## Changes Made
+
+- `specifications/unique-email.specification.ts`: new — `UniqueEmailSpecification`, same shape
+  as `UniqueRoleNameSpecification`/`UniquePermissionNameSpecification`.
+- `AuthService.register` now uses it instead of `if (await this.users.findByEmail(email))`.
+- Documented as an addendum to `ARCH.md` Design 002 rather than a new Design entry — it's the
+  same decision applied to a third call site, not a new decision.
+
+## Why
+
+- `AuthService.register`'s email-uniqueness check is structurally identical to the two checks
+  already converted: "does a row with this identity not already exist." Everything else
+  considered and rejected as a poor fit:
+  - `assignRole`/`revokeRole`/`grantPermission`'s "already has this role/permission" checks are
+    in-memory `.some()` calls on an already-loaded array — no repository call to wrap, and
+    already about as simple as they can be.
+  - `refresh-token.service.ts`'s checks are expiry/state-transition logic on an already-fetched
+    entity (`expiresAt < now`, `revokedAt !== null`), not identity-existence checks — a different
+    shape entirely.
+
+## Tests
+
+2 new tests (`unique-email.specification.spec.ts`). Full repo suite: 132 suites / 1034 tests
+passing; existing `auth.service.spec.ts` passed unmodified, confirming behavior parity.
+
+## Live verification performed (real MySQL/Redis/RabbitMQ)
+
+- `POST /auth/register` with a fresh email → `201`.
+- Same email again → `409 Conflict`, unchanged from before this refactor.
+
+## Build
+
+PASS
+
+## Lint
+
+PASS
+
+## Remaining TODO
+
+- Unchanged from Loop 008.
+
+## Next Loop
+
+- None forced. No further Specification-shaped candidates remain in `libs/auth` as of this pass.

@@ -71,6 +71,38 @@ export class RoleController {
   }
 
   @Permissions('roles:manage')
+  @Post('roles/:roleName/permissions/:permissionName')
+  @ApiOperation({ summary: 'Grant a permission to an existing role' })
+  @ApiResponse({ status: 200, type: RoleResponseDto })
+  @ApiResponse({ status: 404, description: 'Role not found' })
+  @ApiResponse({
+    status: 400,
+    description: 'Permission does not exist',
+  })
+  grantPermission(
+    @Param('roleName') roleName: string,
+    @Param('permissionName') permissionName: string,
+  ): Promise<RoleResponseDto> {
+    return this.authorization.grantPermission(roleName, permissionName);
+  }
+
+  @Permissions('roles:manage')
+  @Delete('roles/:roleName/permissions/:permissionName')
+  @ApiOperation({ summary: 'Revoke a permission from a role' })
+  @ApiResponse({ status: 200, type: RoleResponseDto })
+  @ApiResponse({ status: 404, description: 'Role not found' })
+  @ApiResponse({
+    status: 400,
+    description: 'Permission does not exist',
+  })
+  revokePermission(
+    @Param('roleName') roleName: string,
+    @Param('permissionName') permissionName: string,
+  ): Promise<RoleResponseDto> {
+    return this.authorization.revokePermission(roleName, permissionName);
+  }
+
+  @Permissions('roles:manage')
   @HttpCode(204)
   @Post('users/:userId/roles/:roleName')
   @ApiOperation({ summary: 'Assign a role to a user' })

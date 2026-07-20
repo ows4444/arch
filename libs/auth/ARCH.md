@@ -514,3 +514,81 @@ store would only add operational cost with no consumer that needs it.
   in `apps/server/src/app.module.ts` exactly the way `WORKFLOW_METRICS`/
   `WORKFLOW_EVENT_PUBLISHER` are wired today. `apps/worker` is out of
   scope for this design (see Open Questions).
+
+  > **Superseded in part by Design 002** — `libs/auth` now also depends
+  > directly on `@/validation` (`Specification`, no port/token), for the
+  > same reason it depends directly on `@/database`: both are
+  > stateless/infrastructure libraries upstream of every domain lib, not
+  > swappable side-effecting integrations like the cache/queue ports
+  > above.
+
+---
+
+# Design 002
+
+**Library / Bounded Context:** libs/auth
+**Date:** 2026-07-20
+
+## Goal
+
+Express role/permission-name uniqueness as an async `Specification` (from `@/validation`) instead
+of the ad hoc `if (await this.roles.findByName(name)) throw ...` checks already in
+`AuthorizationService`, per the user's explicit request to complete this open item.
+
+## Scale/Team Context Assumed
+
+Unchanged from Design 001.
+
+## Key Decisions (with risk tag)
+
+**MEDIUM**
+- `libs/auth` gains a direct dependency on `@/validation` (`Specification` interface only — no
+  DTOs, no `ValidationModule`, no DI token). This is **not** the "generic policy/rule engine"
+  Design 001's "Engines / Policies / Specifications" section explicitly deferred — that section
+  was about attribute-based access control rules (a business-logic engine); this is reusing an
+  already-shared, already-built primitive (`Specification<T>`) for two narrow existence checks
+  that already existed as inline `if` statements. No new engine is being introduced into
+  `libs/auth`, just a different shape for logic that was already there.
+  - *Alternative rejected:* leave the inline `if (await repo.findByName(name))` checks as-is.
+    Rejected only because the user explicitly asked for this specific refactor — on its own,
+    per Section 18/"never refactor code that already satisfies readability/maintainability/
+    correctness," the inline checks were not broken and this is a stated-preference change, not a
+    bug fix.
+- New classes live in `libs/auth/src/specifications/` (a new folder, since none existed):
+  `UniqueRoleNameSpecification`, `UniquePermissionNameSpecification` — each takes its repository
+  via constructor injection and implements `Specification<string>` (`isSatisfiedBy`/`explain`
+  against a candidate name).
+- **Addendum (same day):** `UniqueEmailSpecification` added, converting `AuthService.register`'s
+  `if (await this.users.findByEmail(email)) throw new EmailAlreadyRegisteredError()` check — the
+  exact same "does a row with this identity not already exist" shape as the two above. Found
+  while investigating whether the pattern should extend further; other candidate checks in
+  `libs/auth` (`assignRole`/`revokeRole`/`grantPermission`'s in-memory `.some()` membership
+  checks, `refresh-token.service.ts`'s expiry/state-transition checks) do **not** fit this shape
+  — they're either already-simple in-memory checks with no repository call to wrap, or operate on
+  computed/temporal state rather than "does this identity exist," so they were left alone rather
+  than forced into the pattern.
+
+## Rejected Alternatives
+
+- A generic ABAC/policy engine — already rejected in Design 001, not reopened here.
+- Async validation via `libs/validation`'s `ValidationService`/`ValidationRuleService` (the full
+  DB-stored-rule machinery) — rejected as overkill; role/permission-name uniqueness is a fixed
+  invariant of this domain, not an admin-configurable business rule, so it doesn't belong in the
+  stored-rule system at all. Only the bare `Specification` interface is reused, nothing else from
+  `libs/validation`'s DI/module surface.
+
+## CQRS / Event Sourcing Decisions
+
+Unchanged from Design 001 (not applicable).
+
+## Open Questions / Future Evolution
+
+- None — this closes the specific item Design 001 flagged and deferred.
+
+## Handoff to Improvement Loop
+
+- **Public API surface (unchanged):** `UniqueRoleNameSpecification`/
+  `UniquePermissionNameSpecification` are internal to `AuthorizationService`, not exported from
+  `libs/auth/src/index.ts` — no public API change.
+- **Module boundaries (revised):** `libs/auth` may now import `@/validation` directly (see note
+  above superseding Design 001's module-boundary list).
