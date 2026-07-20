@@ -40,7 +40,53 @@ async function bootstrap() {
     .addBearerAuth()
     .build();
   const swaggerDocument = SwaggerModule.createDocument(app, swaggerConfig);
-  SwaggerModule.setup('docs', app, swaggerDocument);
+  SwaggerModule.setup('docs', app, swaggerDocument, {
+    swaggerOptions: {
+      persistAuthorization: true,
+      responseInterceptor: (response: {
+        url: string;
+        status: number;
+        text: string;
+      }) => {
+        const ui = (
+          window as unknown as {
+            ui: {
+              preauthorizeApiKey: (name: string, key: string) => void;
+              authActions: {
+                logout: (names: string[]) => void;
+                persistAuthorizationIfNeeded: () => void;
+              };
+            };
+          }
+        ).ui;
+
+        if (
+          response.status === 200 &&
+          /\/auth\/(login|refresh)$/.test(response.url)
+        ) {
+          try {
+            const body = JSON.parse(response.text) as { accessToken?: string };
+            if (body.accessToken) {
+              ui.preauthorizeApiKey('bearer', body.accessToken);
+              ui.authActions.persistAuthorizationIfNeeded();
+            }
+          } catch {
+            // ignore malformed auth response
+          }
+        }
+
+        if (
+          response.status === 204 &&
+          /\/auth\/logout(-all)?$/.test(response.url)
+        ) {
+          ui.authActions.logout(['bearer']);
+          ui.authActions.persistAuthorizationIfNeeded();
+        }
+
+        return response;
+      },
+    },
+  });
 
   await app.listen(process.env.PORT ?? 3000);
 }
