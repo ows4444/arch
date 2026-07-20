@@ -93,6 +93,7 @@ export * from './types/workflow-status';
  */
 export * from './definition/workflow-metadata';
 export * from './definition/workflow-step-metadata';
+export * from './definition/workflow-step-input-specification';
 export * from './definition/workflow-query-metadata';
 
 /*

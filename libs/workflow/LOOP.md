@@ -1715,3 +1715,99 @@ PASS (`npm run lint`)
   affects the shape of a cross-cutting pattern (not just one call site).
   The `ChildWorkflowService` SRP split is a lower-priority, purely
   organizational follow-up.
+
+---
+
+# Loop 014
+
+**Library:** libs/workflow
+**Date:** 2026-07-20
+
+## Goal
+
+Add a `@Step({ inputSpec })` validation hook, per the user's explicit request to complete this
+item (previously deferred in `libs/validation`'s own loop history as "avoid speculative API
+surface on a semver-sensitive package"). See `ARCH.md` Design 002.
+
+## Files Reviewed
+
+- `engine/executor/step-executor.ts` — where `WorkflowStepResultValidator` already runs, as the
+  symmetric place to run input validation.
+- `libs/workflow/package.json` — `peerDependencies` and the standalone `tsconfig.build.json`,
+  confirming `@/validation` is not (and cannot be) a real dependency of this published package.
+- `engine/validation/step-result.validator.ts` — the existing validator-service shape to mirror.
+
+## Problems Found
+
+**Critical**
+- (none in the existing code — but the CRITICAL item in `ARCH.md` Design 002 is the constraint
+  this whole design had to be built around: `libs/workflow` must never import `@/validation`,
+  even type-only, or the published package breaks for external consumers. Resolved via a
+  self-contained structural interface — see Changes Made.)
+
+**High / Medium / Low**
+- (none)
+
+## Changes Made
+
+- `definition/workflow-step-input-specification.ts`: new — `WorkflowStepInputSpecification<T>`,
+  a self-contained interface shaped identically to `@/validation`'s `Specification<T>` but with
+  zero import from it (structural typing gives interop for free).
+- `WorkflowStepMetadata` gained optional `inputSpec?: WorkflowStepInputSpecification<unknown>` —
+  additive, no existing `@Step(...)` registration is affected.
+- `engine/validation/step-input.validator.ts`: new `WorkflowStepInputValidator`, mirroring
+  `WorkflowStepResultValidator`'s shape — throws `WorkflowExecutionError` (same error type the
+  result validator uses) with the specification's `explain()` messages joined, when
+  `isSatisfiedBy` returns false. No-op when `inputSpec` is undefined.
+- `WorkflowStepExecutor.execute` calls `inputValidator.validate(...)` immediately after resolving
+  the step (before lease renewal, before entering the retry loop) — a bad input fails once,
+  immediately, and is never retried (not a `WorkflowFailureError`, so `isRetriable` is false
+  regardless).
+- Registered `WorkflowStepInputValidator` in `public/workflow.module.ts`'s `BASE_PROVIDERS`,
+  alongside `WorkflowStepResultValidator`. Exported `WorkflowStepInputSpecification` from the
+  barrel; the validator service itself stays internal (same as `WorkflowStepResultValidator`).
+- Appended Design 002 to `ARCH.md` before implementing, given the CRITICAL package-boundary
+  constraint above.
+
+## Why
+
+- Explicit user request. The structural-interface-instead-of-import approach exists specifically
+  to honor CLAUDE.md's instruction to treat `libs/workflow`'s public API "as a real
+  semver-sensitive surface, not just an internal module" — an ordinary monorepo lib could safely
+  import `@/validation` directly (as `libs/queue` and `libs/auth` now do), but this package is
+  built and published standalone, so that option was never available here.
+
+## Tests
+
+- `step-input.validator.spec.ts`: 4 tests (no-op without inputSpec, satisfied, failure message,
+  async specification support).
+- `step-executor.spec.ts`: 2 new tests — `inputValidator.validate` is called with the step's
+  metadata and state data before the handler runs; an input-validation failure propagates without
+  invoking the handler or engaging the retry loop. Existing constructor-argument tests updated for
+  the new `inputValidator` parameter.
+- Confirmed via `grep -rn "@/validation" libs/workflow/src` (excluding specs) that no import was
+  introduced. `libs/workflow`'s standalone `npm run build` fails on unrelated, pre-existing
+  `rootDir` errors for `@/database` imports that predate this change — not something this loop
+  introduced or was asked to fix.
+- Full repo suite: 131 suites / 1020 tests passing.
+
+## Build
+
+PASS (`make check`'s `tsc --noEmit` against the monorepo root config, which is what CI actually
+runs). The library's own standalone `npm run build` has a pre-existing, unrelated failure — noted
+above, out of scope for this loop.
+
+## Lint
+
+PASS
+
+## Remaining TODO
+
+- Unchanged from Loop 013 (the `afterCommit` durability gap, `ChildWorkflowService` SRP split).
+- The standalone `npm run build` `rootDir` failures (pre-existing, affects `@/database` imports
+  too) are worth a dedicated loop if `@ows4444/nest-workflow` is ever actually published from this
+  monorepo — not urgent while it's consumed in-repo via the path alias.
+
+## Next Loop
+
+- None forced for this item — it's complete. Priorities are as stated in Loop 013's Next Loop.

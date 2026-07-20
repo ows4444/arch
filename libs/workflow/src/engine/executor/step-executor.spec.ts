@@ -14,6 +14,7 @@ function setup() {
   const resolver = { resolve: jest.fn().mockReturnValue(handler) };
   const retryDelay = { compute: jest.fn().mockReturnValue(0) };
   const validator = { validate: jest.fn() };
+  const inputValidator = { validate: jest.fn().mockResolvedValue(undefined) };
   const retryJitter = { apply: jest.fn().mockReturnValue(0) };
   const retryScheduler = { wait: jest.fn().mockResolvedValue(undefined) };
   const stateService = {
@@ -48,6 +49,7 @@ function setup() {
     resolver as never,
     retryDelay,
     validator,
+    inputValidator,
     retryJitter,
     retryScheduler,
     stateService as never,
@@ -70,6 +72,7 @@ function setup() {
     resolver,
     retryDelay,
     validator,
+    inputValidator,
     retryJitter,
     retryScheduler,
     stateService,
@@ -236,5 +239,38 @@ describe('WorkflowStepExecutor', () => {
     expect(handler.execute).toHaveBeenCalledTimes(2);
 
     jest.useRealTimers();
+  });
+
+  it('calls WorkflowStepInputValidator.validate with the step metadata inputSpec and state data before invoking the handler', async () => {
+    const { executor, workflow, handler, inputValidator } = setup();
+    const inputSpec = { name: 'TestSpec' };
+    (
+      workflow.steps.get(createWorkflowStepId('step-1')) as never as {
+        metadata: { inputSpec: unknown };
+      }
+    ).metadata.inputSpec = inputSpec;
+    handler.execute.mockResolvedValue({ nextStep: undefined });
+
+    const currentState = state();
+    await executor.execute(workflow as never, currentState);
+
+    expect(inputValidator.validate).toHaveBeenCalledWith(
+      'step-1',
+      inputSpec,
+      currentState.data,
+    );
+    expect(handler.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it('propagates a WorkflowStepInputValidator failure without invoking the handler or retrying', async () => {
+    const { executor, workflow, handler, inputValidator } = setup();
+    inputValidator.validate.mockRejectedValue(
+      new WorkflowExecutionError("Step 'step-1' input failed specification"),
+    );
+
+    await expect(executor.execute(workflow as never, state())).rejects.toThrow(
+      WorkflowExecutionError,
+    );
+    expect(handler.execute).not.toHaveBeenCalled();
   });
 });

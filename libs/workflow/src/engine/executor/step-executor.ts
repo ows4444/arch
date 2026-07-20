@@ -3,6 +3,7 @@ import { ChildWorkflowService } from '../child-workflow/child-workflow.service';
 import { WorkflowRetryDelayService } from '../retry/delay.service';
 import { WorkflowStateService } from '../state/service';
 import { WorkflowStepResultValidator } from '../validation/step-result.validator';
+import { WorkflowStepInputValidator } from '../validation/step-input.validator';
 import { WorkflowStepPersistenceService } from './step-persistence';
 import { WorkflowStepResolver } from './step-resolver';
 import { DEFAULT_STEP_TIMEOUT_MS } from '../../constants/workflow.constants';
@@ -34,6 +35,7 @@ export class WorkflowStepExecutor {
     private readonly retryDelay: WorkflowRetryDelayService,
 
     private readonly validator: WorkflowStepResultValidator,
+    private readonly inputValidator: WorkflowStepInputValidator,
 
     @Inject(WORKFLOW_RETRY_JITTER)
     private readonly retryJitter: WorkflowRetryJitter,
@@ -57,6 +59,12 @@ export class WorkflowStepExecutor {
     if (!step) {
       throw new WorkflowExecutionError(`Step '${state.currentStep}' not found`);
     }
+
+    await this.inputValidator.validate(
+      state.currentStep!,
+      step.metadata.inputSpec,
+      state.data,
+    );
 
     const handler = this.resolver.resolve(step.type);
 

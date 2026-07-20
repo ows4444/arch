@@ -39,6 +39,7 @@ import { WorkflowStateTransitions } from '../engine/state/transitions';
 import { WorkflowStateValidator } from '../engine/state/validator';
 import { WorkflowDefinitionValidator } from '../engine/validation/definition.validator';
 import { WorkflowStepResultValidator } from '../engine/validation/step-result.validator';
+import { WorkflowStepInputValidator } from '../engine/validation/step-input.validator';
 import { WorkflowLeaseService } from '../infrastructure/lease/lease.service';
 import { WorkflowLogger } from '../observability/logger';
 import { NoopWorkflowMetricsService } from '../observability/noop-metrics.service';
@@ -69,6 +70,7 @@ const BASE_PROVIDERS: Provider[] = [
   WorkflowCompensationService,
   WorkflowTransitionValidator,
   WorkflowStepResultValidator,
+  WorkflowStepInputValidator,
   DefaultWorkflowRetryJitterService,
   DefaultWorkflowRetryScheduler,
   NoopWorkflowArchiveStore,

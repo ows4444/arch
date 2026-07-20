@@ -260,3 +260,84 @@ require event replay.
   parallel/fan-out — largest behavioral surface, tackled last so it can
   reuse the status-handling pattern proven in (1) and the
   scheduler-service pattern proven in (4).
+
+---
+
+# Design 002
+
+**Library / Bounded Context:** libs/workflow
+**Date:** 2026-07-20
+
+## Goal
+
+Add a `@Step({ inputSpec })` hook so a step can declare a validation check its input `data` must
+satisfy before the step handler runs, per the user's explicit request to complete this
+previously-deferred item.
+
+## Scale/Team Context Assumed
+
+Unchanged from Design 001.
+
+## Key Decisions (with risk tag)
+
+**CRITICAL**
+- `libs/workflow` (`@ows4444/nest-workflow`) is built and published standalone —
+  `tsconfig.build.json` compiles only `libs/workflow/src`, and the package's `peerDependencies`
+  list exactly what an external consumer must have installed (`@nestjs/common`, `typeorm`, etc.).
+  `@/validation` is a workspace path alias, not a real npm package, and is not in
+  `peerDependencies`. **`libs/workflow` must not import anything — type or value — from
+  `@/validation`.** Doing so would type-check fine inside this monorepo (the root `tsconfig.json`
+  resolves the alias) but would silently break the *published* package for any external consumer,
+  since `tsc` does not rewrite path aliases to relative imports and the emitted `.js`/`.d.ts`
+  would reference an unresolvable module. This is exactly the class of mistake CLAUDE.md's
+  "treat as a real semver-sensitive surface" instruction exists to prevent.
+  - **Resolution:** define a minimal, self-contained structural interface *inside*
+    `libs/workflow` — `WorkflowStepInputSpecification<T>` (`isSatisfiedBy`/`explain`), shaped
+    identically to `@/validation`'s `Specification<T>` but with zero import from it. Because
+    TypeScript uses structural typing, any `Specification` instance built with `libs/validation`
+    (in `apps/server` or another workspace lib) satisfies `WorkflowStepInputSpecification` by
+    shape alone — callers get full interop without either package depending on the other.
+  - *Alternative rejected:* import `Specification` as a type-only import (`import type`).
+    Rejected — even type-only imports of a non-existent-outside-the-monorepo module break
+    external consumers' ability to import the emitted `.d.ts` file, which re-exports/references
+    that type position. A structurally-identical local interface has zero such risk.
+
+**MEDIUM**
+- `inputSpec` validation runs in `WorkflowStepExecutor.execute`, immediately before building the
+  step's `WorkflowContext` and invoking the handler — mirroring where `WorkflowStepResultValidator`
+  already runs (immediately after the handler returns), so input and output validation sit
+  symmetrically around the same call.
+- Failure throws `WorkflowExecutionError` (the same error type `WorkflowStepResultValidator`
+  already throws for structural violations), not a new error class — keeps failure handling
+  (retry classification, etc.) unchanged; a bad input is treated as an execution error, same as
+  a bad result shape.
+- `inputSpec` is optional (`WorkflowStepMetadata.inputSpec?`) — every existing `@Step(...)`
+  registration compiles and behaves identically with no `inputSpec`, so this is additive, not a
+  breaking change to the public API.
+
+## Rejected Alternatives
+
+- Type-only import of `@/validation`'s `Specification` — see CRITICAL decision above.
+- Validating in the step handler itself (each handler calls `ValidationService` manually) —
+  rejected as the default pattern; that's still possible for handlers that want business-rule
+  validation with side effects (DB reads, etc.), but a declarative `inputSpec` on the decorator is
+  what "the input `data` shape must satisfy X before running" actually asked for, and doing it in
+  the executor means a misconfigured step fails before any handler code runs at all.
+
+## CQRS / Event Sourcing Decisions
+
+Unchanged from Design 001 (not applicable).
+
+## Open Questions / Future Evolution
+
+- None — this closes the specific item Design 001's "Suggested implementation order" section had
+  left unaddressed.
+
+## Handoff to Improvement Loop
+
+- **Public API surface (additive):** `WorkflowStepInputSpecification<T>` (new, exported),
+  `WorkflowStepMetadata.inputSpec?` (new optional field), `WorkflowStepInputValidator` (new
+  injectable service, mirroring `WorkflowStepResultValidator`).
+- **Module boundaries (unchanged):** `libs/workflow` still imports nothing from `@/validation`,
+  `@/queue`, `@/auth`, or `@/cache` — only `@/database` for its TypeORM persistence adapter, as
+  already documented in Design 001.
