@@ -6,10 +6,13 @@ function memoryCache(capacity = 10): CacheModuleOptions['caches'][string] {
   return { type: 'memory', options: { capacity } };
 }
 
-function redisCache(): CacheModuleOptions['caches'][string] {
+function redisCache(
+  client: RedisClient = {} as RedisClient,
+  namespace?: string,
+): CacheModuleOptions['caches'][string] {
   return {
     type: 'redis',
-    options: { client: {} as RedisClient },
+    options: { client, ...(namespace !== undefined && { namespace }) },
   };
 }
 
@@ -158,6 +161,60 @@ describe('CacheModuleValidator', () => {
           mem2: memoryCache(),
           redis2: redisCache(),
           combo2: multiLevelCache('mem2', 'redis2'),
+        }),
+      ),
+    ).not.toThrow();
+  });
+
+  it('rejects two redis caches sharing a client and both defaulting to the same namespace', () => {
+    const client = {} as RedisClient;
+
+    expect(() =>
+      CacheModuleValidator.validate(
+        options({
+          a: redisCache(client),
+          b: redisCache(client),
+        }),
+      ),
+    ).toThrow(
+      "Caches 'a' and 'b' share both a Redis client and namespace 'cache' — their keyspaces would collide. Configure a distinct 'namespace' for each.",
+    );
+  });
+
+  it('rejects two redis caches sharing a client and an explicit identical namespace', () => {
+    const client = {} as RedisClient;
+
+    expect(() =>
+      CacheModuleValidator.validate(
+        options({
+          a: redisCache(client, 'orders'),
+          b: redisCache(client, 'orders'),
+        }),
+      ),
+    ).toThrow(
+      "Caches 'a' and 'b' share both a Redis client and namespace 'orders' — their keyspaces would collide. Configure a distinct 'namespace' for each.",
+    );
+  });
+
+  it('accepts two redis caches sharing a client but using distinct namespaces', () => {
+    const client = {} as RedisClient;
+
+    expect(() =>
+      CacheModuleValidator.validate(
+        options({
+          a: redisCache(client, 'orders'),
+          b: redisCache(client, 'users'),
+        }),
+      ),
+    ).not.toThrow();
+  });
+
+  it('accepts two redis caches with the same (default) namespace but different clients', () => {
+    expect(() =>
+      CacheModuleValidator.validate(
+        options({
+          a: redisCache(),
+          b: redisCache(),
         }),
       ),
     ).not.toThrow();

@@ -27,6 +27,47 @@ export class CacheModuleValidator {
     }
 
     this.validateCycles(options);
+    this.validateRedisNamespaces(options);
+  }
+
+  /**
+   * Two `redis` caches that share both a Redis client and an (effective,
+   * default-applied) namespace would silently share the same Redis
+   * keyspace — `RedisCacheStore` keys are just `${namespace}:${key}`, with
+   * no isolation beyond that string prefix. A `clear()`/`keys()`/`entries()`
+   * SCAN on one cache would then enumerate and (for `clear()`) `UNLINK` the
+   * other cache's entries too. Since `namespace` defaults to `'cache'` when
+   * omitted, this is easy to hit by accident (e.g. two `redis` cache
+   * entries reusing the same client and both omitting `namespace`) — catch
+   * it at boot rather than letting it corrupt data at runtime.
+   */
+  private static validateRedisNamespaces(options: CacheModuleOptions): void {
+    const namespacesByClient = new Map<unknown, Map<string, string>>();
+
+    for (const [name, config] of Object.entries(options.caches)) {
+      if (config.type !== 'redis') {
+        continue;
+      }
+
+      const namespace = config.options.namespace ?? 'cache';
+
+      let namespaces = namespacesByClient.get(config.options.client);
+
+      if (!namespaces) {
+        namespaces = new Map<string, string>();
+        namespacesByClient.set(config.options.client, namespaces);
+      }
+
+      const collidingCache = namespaces.get(namespace);
+
+      if (collidingCache) {
+        throw new Error(
+          `Caches '${collidingCache}' and '${name}' share both a Redis client and namespace '${namespace}' — their keyspaces would collide. Configure a distinct 'namespace' for each.`,
+        );
+      }
+
+      namespaces.set(namespace, name);
+    }
   }
 
   private static validateMultiLevel(

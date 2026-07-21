@@ -213,3 +213,159 @@ PASS (`npm run lint`)
   than defect-driven. `libs/database` still has its own deferred Next Loop
   items (`Symbol.for` token risk, `RepositoryResolver` dead methods,
   `CursorPagination` types) if the loop continues there next.
+
+# Loop 003
+
+**Library:** libs/cache
+**Date:** 2026-07-22
+
+## Goal
+
+Fresh, adversarial Phase 1/2 pass over the whole library (all 45 source
+files under `libs/cache/src`, plus the app's real wiring in
+`apps/server/src/app.module.ts` and `apps/server/src/redis/ioredis-client.adapter.ts`
+for consumption context) with special attention to ci.loop §9's Caching
+Rules — mutation-through-reference, eviction correctness, multi-level
+registry ordering, Redis reply coercion, global interceptor side effects,
+composite key collision, multi-tenant isolation — most of which were
+already closed in Loops 1-2. Goal was to find one more genuinely real,
+justified issue rather than rubber-stamp the library clean, and only fix
+it if it survived scrutiny.
+
+## Files Reviewed
+
+- All files under `libs/cache/src/**` (root-level manager/registry/
+  factory/validator/constants, `caches/`, `clocks/`, `core/`, `interfaces/`,
+  `nest/`, `policies/`, `storage/`, `utils/`) plus `index.ts` and every
+  existing `.spec.ts`.
+- `apps/server/src/app.module.ts` (`CacheModule.forRootAsync` wiring: one
+  `redis` cache namespaced `'app'`, one `memory` L1, one `multi-level`
+  composing them) and `apps/server/src/redis/ioredis-client.adapter.ts`
+  (the real `RedisClient` implementation) for how the lib is actually
+  consumed — read-only, not edited per task constraints.
+- Re-verified (not re-fixed) that Loop 1/2's closed items are still closed:
+  `MemoryCache`/`MemoryCacheStorage` clone semantics, `MultiLevelCache`
+  `getWithMetadata`, `@Global()` registration, `useExisting`/`useClass`,
+  Redis SCAN+UNLINK-backed `clear()`/`keys()`/etc., `@Cacheable` +
+  `@CachePut`/`@CacheEvict` stacking on both hit and miss paths.
+- Replacement policies (`lru`/`lfu`/`fifo`/`mru`): traced `onSet`/`onGet`/
+  `onDelete`/`evict()` against `MemoryCache.doSet`/`doDelete` to check for
+  policy/store desync on eviction — none found (each eviction path removes
+  from both the policy's tracking structure and the backing store exactly
+  once, verified for all four policies).
+- `MemoryCache`'s `writeLock` mutex: traced every `get`/`set`/`delete`/
+  `getWithMetadata` call path for read-outside-lock races — found only
+  benign eventual-consistency staleness (a `touch:false` read snapshot
+  taken before entering the lock), not a correctness bug worth changing.
+
+## Problems Found
+
+**Critical**
+
+- (none)
+
+**High**
+
+- (none)
+
+**Medium**
+
+- `CacheModuleValidator.validate()` never checked for Redis namespace
+  collisions. `RedisCacheStore` keys are just `${namespace}:${key}` with no
+  isolation beyond that string prefix, and `namespace` silently defaults to
+  `'cache'` when omitted (`RedisCacheConfiguration.namespace` is optional,
+  `CacheFactory.redis`'s parameter default is `'cache'`). Two `redis` cache
+  entries in the same `caches: {}` map that reuse the same `RedisClient`
+  and both omit (or both explicitly set the same) `namespace` would
+  silently share one Redis keyspace: `cache-a.set('x', ...)` and
+  `cache-b.get('x')` would see each other's data, and — worse — a
+  namespace-scoped `clear()`/`SCAN`+`UNLINK` on one cache would delete the
+  other cache's entries too, exactly the "composite key collision" /
+  multi-tenant isolation failure ci.loop §9 calls out by name. Not
+  currently triggered by `apps/server/src/app.module.ts` (only one `redis`
+  cache is configured there), but nothing in the library stopped a future
+  second `redis` cache entry from hitting this silently — the validator
+  already catches structurally-unsafe configs (missing `defaultCache`,
+  unknown `l1`/`l2` refs, multi-level cycles) at boot, so a silently
+  colliding keyspace was a real, unguarded gap in that same safety net.
+
+**Low**
+
+- (none newly found this loop beyond what Loop 2 already deferred — see
+  below.)
+
+## Changes Made
+
+- `cache.module.validator.ts`: added `validateRedisNamespaces`, called from
+  `validate()` alongside the existing cycle check. Groups all `redis` cache
+  configs by their `RedisClient` object reference, then within each group
+  checks for a duplicate *effective* namespace (`config.options.namespace
+  ?? 'cache'`) and throws a named, actionable error identifying both
+  colliding cache names and the shared namespace. Deliberately scoped to
+  "same client reference" rather than "same namespace string" globally —
+  two `redis` caches pointed at genuinely different Redis servers can
+  safely reuse the same namespace string (they don't actually share a
+  keyspace), and the library has no way to detect "same server, different
+  client object" from a bare `RedisClient` interface, so flagging that case
+  would produce false positives. Reference-equality on the shared client is
+  the one case that's both fully detectable and unambiguously unsafe.
+- `cache.module.validator.spec.ts`: extended the `redisCache()` test helper
+  to accept an explicit `client`/`namespace` (previously always built a
+  fresh anonymous client with no namespace override), and added 4 new
+  tests: rejects two same-client caches both defaulting to `'cache'`,
+  rejects two same-client caches with an identical explicit namespace,
+  accepts two same-client caches with distinct namespaces, accepts two
+  different-client caches sharing the same (default) namespace.
+
+## Why
+
+- This is a direct, previously-unguarded instance of the exact risk
+  category ci.loop §9 names ("Composite key collision risk", "Multi-tenant
+  isolation") — not an invented or cosmetic finding. The fix is additive
+  validation only (mirrors the existing `validateCycles`/`validateMultiLevel`
+  pattern exactly), throws only for configs that were already silently
+  broken (any app currently relying on two same-client, same-namespace
+  redis caches was already experiencing data corruption, just undetected),
+  and does not change the public API shape (`CacheModuleOptions`,
+  `RedisCacheConfiguration` untouched) — so it's classified MEDIUM risk per
+  ci.loop §18 (validation/caching-adjacent change, backward compatible for
+  every correctly-configured app, including the real
+  `apps/server/src/app.module.ts` config, which was re-verified to still
+  pass validation unchanged).
+- Everything else inspected this loop (replacement-policy/store desync,
+  `writeLock` race windows, Loop 1/2's previously-closed items) held up
+  under adversarial re-reading — per ci.loop §18, code that already
+  satisfies correctness was deliberately left untouched rather than
+  refactored for its own sake.
+
+## Tests
+
+`libs/cache` suite is now 13 spec files / 155 tests (up from 151). Full
+monorepo suite: 133 suites / 1044 tests, all passing.
+
+## Build
+
+PASS (`npm run typecheck`)
+
+## Lint
+
+PASS (`npm run lint`)
+
+## Remaining TODO
+
+- Document (or reconsider) the Redis/Memory TTL precision mismatch
+  (`Math.ceil(ttlMs / 1000)` in `RedisCacheStore.set()` vs. millisecond
+  precision in `MemoryCache`) — carried over from Loop 2, still not
+  addressed. Investigated this loop only to the extent of confirming the
+  rounding direction (always rounds *up*) is the safe one for the one
+  security-sensitive consumer that exists today (`CacheAccessTokenDenylist`
+  in `libs/auth`, riding on the `default` redis cache) — a denylist entry
+  can only outlive its requested TTL by up to ~999ms, never expire early.
+  Still worth an explicit doc comment next loop rather than leaving it
+  tribal knowledge.
+- No `ARCH.md` exists for this library yet.
+
+## Next Loop
+
+- Add the TTL-precision doc comment (or decide it's not worth one).
+- No other Critical/High/Medium findings open as of this loop.
