@@ -70,7 +70,18 @@ export class WorkflowCompletionService {
     const parent = await this.children.findParent(persisted);
 
     if (parent) {
-      await this.children.onChildCompleted(parent, persisted);
+      // onChildCompleted() can synchronously resume the parent at its join
+      // step via checkJoinQuorum()/resumeJoin() when this child completes a
+      // fan-out quorum — that runs real step logic, not just a state flip.
+      // Calling it inline here would nest the parent's join-step execution
+      // inside this child's own still-open completion transaction (holding
+      // its connection/locks for the duration, and potentially nesting a
+      // second transaction inside the first). Deferred to afterCommit, the
+      // same pattern already used below for the completion event and in
+      // ChildWorkflowService's 'retry-child' failure policy.
+      this.transactionRunner.afterCommit?.(() =>
+        this.children.onChildCompleted(parent, persisted),
+      );
     }
 
     this.transactionRunner.afterCommit?.(() =>

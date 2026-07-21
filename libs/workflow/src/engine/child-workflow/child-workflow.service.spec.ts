@@ -837,7 +837,8 @@ describe('ChildWorkflowService', () => {
     });
 
     it("checks join quorum after an 'ignore'-policy child permanently fails", async () => {
-      const { service, stateService, executor, registeredParent } = setup();
+      const { service, stateService, executor, registeredParent, flushAfterCommit } =
+        setup();
       (
         registeredParent.metadata.childWorkflows[0]! as {
           failurePolicy: string;
@@ -853,6 +854,13 @@ describe('ChildWorkflowService', () => {
       stateService.findByParentWorkflowId.mockResolvedValue([failedChild]);
 
       await service.onChildFailed(joinWaitingParent, failedChild);
+
+      // Deferred to afterCommit — see child-workflow.service.ts's comment
+      // on this case — so resumeJoin() shouldn't fire until the deferred
+      // callback runs, same as the 'retry-child' cases below.
+      expect(executor.resumeJoin).not.toHaveBeenCalled();
+
+      await flushAfterCommit();
 
       expect(executor.resumeJoin).toHaveBeenCalledWith('parent-1');
     });

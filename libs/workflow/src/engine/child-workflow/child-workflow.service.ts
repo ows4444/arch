@@ -495,8 +495,16 @@ export class ChildWorkflowService {
         // 'ignore' is terminal immediately — if this child belongs to an
         // active fan-out, its permanent failure may now satisfy an 'all'
         // join that would otherwise wait forever (see evaluateJoin).
+        // Deferred to afterCommit for the same reason as 'retry-child'
+        // below: onChildFailed runs synchronously from
+        // WorkflowFailureService.failExecution, nested inside the failing
+        // child's own still-open transaction, and checkJoinQuorum() can
+        // synchronously resume the parent's join step via resumeJoin() —
+        // real step execution, not just a state flip.
         if (child.joinId) {
-          await this.checkJoinQuorum(parent.workflowId);
+          this.transactionRunner.afterCommit?.(() =>
+            this.checkJoinQuorum(parent.workflowId).then(() => undefined),
+          );
         }
 
         return;

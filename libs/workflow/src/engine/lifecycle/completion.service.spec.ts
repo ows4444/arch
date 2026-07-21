@@ -34,12 +34,22 @@ function setup() {
   };
   const publisher = { completed: jest.fn() };
 
-  let afterCommitCallback: (() => Promise<void>) | undefined;
+  const afterCommitCallbacks: Array<() => Promise<void>> = [];
   const transactionRunner = {
     executeOrJoin: jest.fn((operation: () => unknown) => operation()),
     afterCommit: jest.fn((callback: () => Promise<void>) => {
-      afterCommitCallback = callback;
+      afterCommitCallbacks.push(callback);
     }),
+  };
+  const flushAfterCommit = async (): Promise<void> => {
+    const callbacks = afterCommitCallbacks.splice(
+      0,
+      afterCommitCallbacks.length,
+    );
+
+    for (const callback of callbacks) {
+      await callback();
+    }
   };
 
   const service = new WorkflowCompletionService(
@@ -59,7 +69,7 @@ function setup() {
     registry,
     publisher,
     transactionRunner,
-    getAfterCommitCallback: () => afterCommitCallback,
+    flushAfterCommit,
   };
 }
 
@@ -133,7 +143,7 @@ describe('WorkflowCompletionService', () => {
   });
 
   it('completes the workflow once all managed children have finished', async () => {
-    const { service, children, publisher, getAfterCommitCallback } = setup();
+    const { service, children, publisher, flushAfterCommit } = setup();
     const state = createWorkflowExecutionState({
       status: 'running',
       currentStep: undefined,
@@ -148,7 +158,7 @@ describe('WorkflowCompletionService', () => {
     children.isManagedChild.mockReturnValue(true);
 
     const result = await service.completeIfFinished(state);
-    await getAfterCommitCallback()?.();
+    await flushAfterCommit();
 
     expect(result.completed).toBe(true);
     expect(result.state.status).toBe('completed');
@@ -156,7 +166,7 @@ describe('WorkflowCompletionService', () => {
   });
 
   it('notifies the parent when a managed child workflow completes', async () => {
-    const { service, children } = setup();
+    const { service, children, flushAfterCommit } = setup();
     const parent = createWorkflowExecutionState({ workflowId: 'parent-1' });
     const state = createWorkflowExecutionState({
       status: 'running',
@@ -167,6 +177,13 @@ describe('WorkflowCompletionService', () => {
     children.findParent.mockResolvedValue(parent);
 
     const result = await service.completeIfFinished(state);
+
+    // Deferred to afterCommit — see completion.service.ts's comment on
+    // this call — so onChildCompleted() shouldn't fire until the deferred
+    // callback runs.
+    expect(children.onChildCompleted).not.toHaveBeenCalled();
+
+    await flushAfterCommit();
 
     expect(children.onChildCompleted).toHaveBeenCalledWith(
       parent,

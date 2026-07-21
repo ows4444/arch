@@ -1998,3 +1998,107 @@ PASS (`npm run lint`)
   half-migrated state.
 - `ChildWorkflowService`'s SRP split (join-quorum/summarization → its own service) remains a
   lower-priority, purely organizational follow-up.
+
+---
+
+# Loop 016
+
+**Library:** libs/workflow
+**Date:** 2026-07-22
+
+## Goal
+
+Fix the `onChildCompleted` synchronous-transaction-nesting bug Loop 015 identified and explicitly
+deferred, per direct user request.
+
+## Files Reviewed
+
+- `libs/workflow/src/engine/lifecycle/completion.service.ts`
+- `libs/workflow/src/engine/child-workflow/child-workflow.service.ts`
+- `libs/workflow/src/engine/lifecycle/completion.service.spec.ts`
+- `libs/workflow/src/engine/child-workflow/child-workflow.service.spec.ts`
+
+## Problems Found
+
+**Critical**
+- None
+
+**High**
+- `WorkflowCompletionService.completeIfFinished()` called `ChildWorkflowService.onChildCompleted()`
+  synchronously, before registering its own `afterCommit` callback for the completion event. When
+  `onChildCompleted` finds `child.joinId` set, it calls `checkJoinQuorum()` → `executor.resumeJoin()`,
+  which runs the parent's actual join-step logic — not a status flip. That ran nested inside the
+  completing child's own still-open completion transaction, exactly matching the shape of the bug
+  fixed in Loop 014/015 for `retry-child` (real work held a transaction open; here a nested nested
+  step execution, rather than a blocking timer, is the payload) — Loop 015 named this exact call site
+  in its Remaining TODO and deliberately left it for a follow-up.
+- Same defect found in a second, previously-unnoticed spot while fixing the above: `onChildFailed`'s
+  `'ignore'` case also called `checkJoinQuorum()` synchronously — inside `WorkflowFailureService
+  .failExecution`'s still-open failure transaction, the same way the pre-Loop-014 `retry-child` case
+  did. Only `retry-child` was deferred to `afterCommit` in Loop 014; `'ignore'` was missed. Fixed in
+  the same pass since it's the identical root cause and fix shape, not a separate design question.
+
+**Medium**
+- None
+
+**Low**
+- None
+
+## Changes Made
+
+- `completion.service.ts`: wrapped the `this.children.onChildCompleted(parent, persisted)` call in
+  `this.transactionRunner.afterCommit?.(...)`, matching the pattern already used two lines below it
+  for the completion event.
+- `child-workflow.service.ts`: wrapped the `'ignore'` case's `checkJoinQuorum(parent.workflowId)`
+  call in `this.transactionRunner.afterCommit?.(...)` — the transaction runner was already injected
+  into this class for the `retry-child` case.
+- Updated `completion.service.spec.ts`'s test harness from a single captured `afterCommitCallback` to
+  an array + `flushAfterCommit()` helper (mirroring the pattern already in
+  `child-workflow.service.spec.ts`), since this loop's fix means the harness now needs to capture two
+  independent deferred callbacks (`onChildCompleted`, `publisher.completed`) instead of one.
+- Updated two existing tests (one per file) that asserted the old synchronous-call behavior to instead
+  assert the call is *not* made before `flushAfterCommit()`, then *is* made after — same shape as the
+  existing `retry-child` tests.
+
+## Why
+
+Loop 015 explicitly scoped this out as lower-urgency (no blocking real-time wait, unlike the
+`retry-child` case) and suggested bundling it into a future Design Mode pass covering the broader
+`afterCommit`-durability question. The user asked for this specific fix directly, which changes the
+prioritization — doing the narrow, mechanical part of "these three `checkJoinQuorum()` call sites all
+defer to `afterCommit`, matching the pattern already established for `retry-child`" doesn't require
+resolving the broader durability question Loop 013 raised (what happens if the process crashes
+between commit and an `afterCommit` callback running) — that question applies equally to the
+already-deferred `retry-child`/`publisher.completed` calls today and isn't made worse by adding two
+more callers to the same existing mechanism.
+
+## Tests
+
+`libs/workflow` suite: 48 spec files / 454 tests, all passing (2 pre-existing tests updated to assert
+the new deferred timing rather than the old synchronous one; no net change in test count — this loop
+tightened existing assertions rather than adding coverage for new behavior). Full monorepo suite: 133
+suites / 1049 tests, all passing.
+
+## Build
+
+PASS (`npm run typecheck` — `tsc --noEmit`)
+
+## Lint
+
+PASS (`npm run lint`)
+
+## Remaining TODO
+
+- Unchanged from Loop 013/014/015: the broader `afterCommit` side-effect durability gap (a crash
+  between physical commit and the deferred callback running silently drops the callback — applies to
+  every `afterCommit` user in this file, not just the two touched this loop) remains a Design Mode
+  question, not a loop-sized fix. `ChildWorkflowService`'s SRP split remains a lower-priority
+  organizational follow-up — this is the sixth loop in a row to touch this file.
+
+## Next Loop
+
+- The three `checkJoinQuorum()` call sites (`onChildCompleted`, `onChildFailed`'s `'ignore'` case,
+  `onChildFailed`'s `'retry-child'` case) are now uniformly deferred to `afterCommit` — Loop 015's
+  "piecemeal vs. uniform" concern about this specific call is resolved. The broader durability
+  question (Loop 013) is still open and is the better next target than further piecemeal fixes here.
+  lower-priority, purely organizational follow-up.
