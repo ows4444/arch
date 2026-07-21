@@ -31,23 +31,35 @@ describe('AuthController', () => {
     expect(result).toEqual({ id: 'user-1', email: 'a@example.com' });
   });
 
-  it('delegates login to AuthService', () => {
+  it('delegates login to AuthService, forwarding the caller IP/user-agent as refresh-token metadata', () => {
     const { controller, auth } = setup();
     const session = { accessToken: 'a', refreshToken: 'r' };
     auth.login.mockReturnValue(session);
 
     const dto = { email: 'a@example.com', password: 'pw' };
-    expect(controller.login(dto)).toBe(session);
-    expect(auth.login).toHaveBeenCalledWith(dto);
+    expect(controller.login(dto, '203.0.113.5', 'test-agent')).toBe(session);
+    expect(auth.login).toHaveBeenCalledWith(dto, {
+      createdByIp: '203.0.113.5',
+      userAgent: 'test-agent',
+    });
   });
 
-  it('delegates refresh to AuthService', () => {
+  it('delegates refresh to AuthService, forwarding the caller IP/user-agent as refresh-token metadata', () => {
     const { controller, auth } = setup();
     const session = { accessToken: 'a2', refreshToken: 'r2' };
     auth.refresh.mockReturnValue(session);
 
-    expect(controller.refresh({ refreshToken: 'old-token' })).toBe(session);
-    expect(auth.refresh).toHaveBeenCalledWith('old-token');
+    expect(
+      controller.refresh(
+        { refreshToken: 'old-token' },
+        '203.0.113.5',
+        'test-agent',
+      ),
+    ).toBe(session);
+    expect(auth.refresh).toHaveBeenCalledWith('old-token', {
+      createdByIp: '203.0.113.5',
+      userAgent: 'test-agent',
+    });
   });
 
   it('logs out using the current access token jti/expiry and the supplied refresh token', async () => {

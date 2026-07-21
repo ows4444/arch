@@ -2,7 +2,9 @@ import {
   Body,
   Controller,
   Get,
+  Headers,
   HttpCode,
+  Ip,
   Post,
   UseGuards,
 } from '@nestjs/common';
@@ -23,6 +25,7 @@ import { Public } from '../decorators/public.decorator';
 import { CurrentUser } from '../decorators/current-user.decorator';
 import { JwtAuthGuard } from '../guards/jwt-auth.guard';
 import type { AuthenticatedUser } from '../guards/jwt-auth.guard';
+import type { RefreshTokenMetadata } from '../application/refresh-token.service';
 
 /**
  * Not applied via a global guard — `apps/server` mounts pre-existing routes
@@ -51,8 +54,12 @@ export class AuthController {
   @ApiOperation({ summary: 'Log in and receive an access + refresh token' })
   @ApiResponse({ status: 200, type: AuthSessionResponseDto })
   @ApiResponse({ status: 401, description: 'Invalid credentials' })
-  login(@Body() dto: LoginDto): Promise<AuthSessionResponseDto> {
-    return this.auth.login(dto);
+  login(
+    @Body() dto: LoginDto,
+    @Ip() ip: string,
+    @Headers('user-agent') userAgent?: string,
+  ): Promise<AuthSessionResponseDto> {
+    return this.auth.login(dto, this.metadata(ip, userAgent));
   }
 
   @Public()
@@ -64,8 +71,12 @@ export class AuthController {
     status: 401,
     description: 'Refresh token invalid, expired, or reused',
   })
-  refresh(@Body() dto: RefreshDto): Promise<AuthSessionResponseDto> {
-    return this.auth.refresh(dto.refreshToken);
+  refresh(
+    @Body() dto: RefreshDto,
+    @Ip() ip: string,
+    @Headers('user-agent') userAgent?: string,
+  ): Promise<AuthSessionResponseDto> {
+    return this.auth.refresh(dto.refreshToken, this.metadata(ip, userAgent));
   }
 
   @ApiBearerAuth()
@@ -98,5 +109,20 @@ export class AuthController {
   @ApiResponse({ status: 200, type: AuthenticatedUserResponseDto })
   me(@CurrentUser() user: AuthenticatedUser): AuthenticatedUser {
     return user;
+  }
+
+  /**
+   * `RefreshTokenEntity.createdByIp`/`userAgent` exist for exactly this
+   * purpose (see libs/auth/ARCH.md, Domain Model) but were previously never
+   * populated — this is the only production caller of `login`/`refresh`,
+   * so without wiring these here every stored refresh token had NULL
+   * device/IP provenance, silently defeating the forensic value those
+   * columns were designed for (e.g. spotting a stolen refresh token used
+   * from an unfamiliar IP).
+   */
+  private metadata(ip: string, userAgent?: string): RefreshTokenMetadata {
+    return userAgent === undefined
+      ? { createdByIp: ip }
+      : { createdByIp: ip, userAgent };
   }
 }

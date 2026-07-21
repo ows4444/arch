@@ -1011,3 +1011,116 @@ PASS
 ## Next Loop
 
 - None forced. No further Specification-shaped candidates remain in `libs/auth` as of this pass.
+
+---
+
+# Loop 012
+
+**Library:** libs/auth
+
+**Date:** 2026-07-21
+
+## Goal
+
+Fresh, adversarial Phase 1/2 review of `libs/auth` after 11 prior loops (per ci.loop, no rubber-
+stamping "nothing found" without actually re-reading the security-critical paths: authz
+boundaries, token handling, password/secret handling, sensitive-data logging).
+
+## Files Reviewed
+
+- `application/{auth.service,token.service,refresh-token.service,authorization.service}.ts`
+- `guards/{jwt-auth.guard,permissions.guard,roles.guard}.ts`
+- `http/{auth.controller,role.controller}.ts` + their specs
+- `domain/{user.entity,role.entity,refresh-token.entity,user.repository,role.repository,
+  refresh-token.repository}.ts`
+- `adapters/{argon2-password-hasher,cache-access-token-denylist}.ts`
+- `auth.module.ts`, `auth-config.module.ts`, `config/auth.schema.ts`
+- `dto/{login.dto,register.dto,refresh.dto,authenticated-user-response.dto}.ts`
+- `index.ts` (public barrel), `apps/server/src/main.ts` (body-size/helmet/CORS context)
+
+## Problems Found
+
+**Critical**
+- None.
+
+**High**
+- None.
+
+**Medium**
+- `RefreshTokenEntity.createdByIp`/`userAgent` are fully modeled end-to-end (migration column,
+  `RefreshTokenMetadata` parameter threaded through `RefreshTokenService.issue`/`rotate`) but the
+  only production caller — `AuthController.login`/`refresh` — never supplied them. Every stored
+  refresh-token row therefore had `createdByIp = NULL`, `userAgent = NULL` in practice, silently
+  defeating the forensic purpose these columns exist for (ARCH.md's Domain Model section: tracing
+  a rotation chain / spotting a stolen refresh token replayed from an unfamiliar device or IP).
+  This is a real gap between designed capability and delivered behavior, not a cosmetic nit — it
+  directly weakens investigation of exactly the reuse-detection scenario Loop 003/007 hardened.
+
+**Low**
+- `RefreshDto.refreshToken` had no `@MaxLength`, unlike `LoginDto`/`RegisterDto`'s password fields
+  (bounded in Loop 003 specifically to avoid an unbounded-input DoS lever against a public,
+  unauthenticated endpoint). `POST /auth/refresh` is `@Public()` and hashes the input with SHA-256
+  before any length check — cheap per byte, but still inconsistent with the established pattern of
+  bounding every public-endpoint string input. Express's default body-size limit already bounds the
+  worst case, so this was Low, not Medium/High, but fit the same fix pattern as the earlier one.
+
+Everything else re-checked and found already correct, not re-litigated: `PermissionsGuard`/
+`RolesGuard` do live DB reads (not stale JWT claims, confirmed against Loop 008's fix);
+`revokeIfActive`'s atomic conditional `UPDATE` still holds (Loop 003/007); passwords/tokens are
+never logged; `argon2id` hashing and SHA-256-only-persisted refresh tokens are unchanged;
+`@Public()`/guard wiring is fail-closed; RBAC management routes are still gated behind
+`roles:manage` with no auto-admin bootstrap; module DI wiring (`AuthConfigModule` sidestepping the
+parent-can't-inject-into-child-import Nest limitation) is unchanged and correct.
+
+## Changes Made
+
+- `libs/auth/src/http/auth.controller.ts`: `login`/`refresh` now accept `@Ip()` and
+  `@Headers('user-agent')` and forward them as `RefreshTokenMetadata` to `AuthService.login`/
+  `refresh`, via a small private `metadata()` helper (built to satisfy `exactOptionalPropertyTypes`
+  — omits `userAgent` entirely rather than assigning it `undefined`).
+- `libs/auth/src/dto/refresh.dto.ts`: added `@MaxLength(512)` to `refreshToken` (actual issued
+  tokens are 96 hex chars; 512 leaves headroom without being unbounded).
+- `libs/auth/src/http/auth.controller.spec.ts`: updated the `login`/`refresh` delegation tests to
+  assert the new IP/user-agent arguments and the resulting `RefreshTokenMetadata` passed to
+  `AuthService`.
+
+## Why
+
+Both changes connect already-designed, already-built code to where it was always supposed to plug
+in (same category as Loop 005's `@Roles()`/`AuthEnvironmentSchema` fixes) rather than introducing
+new scope — `RefreshTokenMetadata` and its DTO/entity/migration support already existed; only the
+one real caller wiring it was missing. No public API shape changed (`AuthController`'s route
+signatures, request/response DTOs, and `RefreshTokenMetadata`'s own shape are unchanged) and no
+new dependency was introduced — `@Ip()`/`@Headers()` are existing `@nestjs/common` decorators
+already usable in this Express-based app.
+
+## Tests
+
+Updated 2 existing tests in `auth.controller.spec.ts` (no new test files needed — the change is a
+controller wiring fix, not new branching logic). `libs/auth`: 95/95 tests passing across 17 suites.
+Full monorepo suite: 1040/1040 tests passing across 133 suites (no regressions). (One-time
+environment fix along the way, unrelated to the code change: `better-sqlite3`'s native binding was
+built against a different Node version than the one running tests; `npm rebuild better-sqlite3`
+resolved it before any test ran — flagging in case a fresh checkout hits the same thing.)
+
+## Build
+
+PASS (`npm run typecheck` — `tsc --noEmit` clean)
+
+## Lint
+
+PASS (`npm run lint`, auto-fixed formatting only)
+
+## Remaining TODO
+
+- Unchanged from Loop 008: password reset/email verification and `apps/server` shutdown-hooks/
+  CORS/Helmet status (helmet/CORS/shutdown hooks are in fact now present in `apps/server/src/
+  main.ts` as of this pass — worth a follow-up loop closing that stale TODO line explicitly, but
+  out of scope to touch here since it's outside `libs/auth`).
+- No endpoint to delete a role/permission or list a single user's roles (unchanged from Loop 008).
+
+## Next Loop
+
+- None forced. If a future loop revisits `apps/server`, confirm/close the stale "no shutdown
+  hooks/CORS/Helmet" TODO line noted above — it appears to already be resolved outside this
+  library's scope.
