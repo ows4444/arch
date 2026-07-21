@@ -1049,3 +1049,121 @@ PASS
 
 - None forced. Change is HIGH risk (schema) per Design 007 — flagged to the user rather than
   committed automatically.
+
+---
+
+# Loop 013
+
+**Library:** validation
+
+**Date:** 2026-07-21
+
+## Goal
+
+Fresh, adversarial Phase 1/2 review of `libs/validation` as it stands after 12 prior loops —
+looking for a real defect rather than rubber-stamping "nothing found" or inventing cosmetic
+busywork (per ci.loop §18: don't refactor code that already satisfies readability/maintainability/
+correctness).
+
+## Files Reviewed
+
+- Every non-spec file under `libs/validation/src/` (core, class-validator, nest, errors,
+  persistence, rules), read fresh against ci.loop §2/§10/§12/§13.
+- `libs/database/src/decorators/database-repository.decorator.ts`,
+  `libs/database/src/repository/repository.providers.ts`,
+  `libs/database/src/repository/repository-resolver.ts` — to rule out a repeat of Loop 010's
+  missing-`@InjectRepository` class of bug and to confirm `DatabaseValidationRuleStore` being
+  unconditionally constructed (Loop 008 change) is genuinely inert (no DataSource access) when
+  `rules.enabled` is false, not a latent boot-time crash for a hypothetical second host app.
+- `libs/auth/src/specifications/unique-email.specification.ts` (+ `unique-role-name`,
+  `unique-permission-name`) — confirmed these already `import type { Specification } from
+  '@/validation'` rather than redefining the interface, so the Design 001/ARCH.md "auth uniqueness
+  checks as async Specifications" open item is in fact already done; no duplication to fix and
+  `libs/auth` was not touched.
+- `libs/queue/src` / `libs/workflow/src` grepped for `validateSync`/`plainToInstance` — only hit is
+  `libs/auth/src/config/auth.schema.spec.ts` (a schema test, unrelated) — confirmed no remaining
+  bespoke class-validator invocation duplicating `ClassValidatorSpecification` anywhere else in the
+  monorepo.
+
+## Problems Found
+
+**Critical**
+- (none)
+
+**High**
+- (none)
+
+**Medium**
+- `evaluateStoredRule` (`rule-evaluator.ts`)'s `switch (rule.operator)` had no `default` branch.
+  Every declared type-mismatch path in this function fails closed (returns `{ satisfied: false,
+  reason }`) by explicit design — see the function's own docstring and ARCH.md Design 002's MEDIUM
+  decision ("a misconfigured stored rule should be visible as a validation failure, not a silent
+  no-op"). But an `operator` value outside the `ValidationRuleOperator` enum fell through the
+  switch with no matching case and no `default`, so the function returned `undefined` instead of a
+  `RuleEvaluation` — TypeScript didn't catch it (`noImplicitReturns` isn't set, and `strict: true`
+  doesn't imply it) and no test exercised it. The caller (`StoredConditionSpecification.
+  isSatisfiedBy`) then dereferences `.satisfied` on `undefined`, throwing a `TypeError` instead of
+  producing the designed fail-closed validation failure. Reachable via a row written or edited
+  outside the DTO-validated admin API (direct SQL, a migration, an ops fix — Loop 010 already
+  needed a direct-SQL workaround once for an unrelated reason) or a future `ValidationRuleOperator`
+  member added without updating this switch — not reachable through the normal HTTP admin path
+  today (the DTOs `@IsEnum`-validate `operator`), but the whole point of "fail closed" as a stated
+  design invariant is to hold even when the normal path is bypassed, and this one silently didn't.
+
+**Low**
+- (none)
+
+## Changes Made
+
+- `libs/validation/src/rules/rule-evaluator.ts`: added a `default` branch to `evaluateStoredRule`'s
+  switch, returning `{ satisfied: false, reason: 'Rule #<id>: unknown operator "<value>"' }` —
+  matching the exact shape/tone of every other fail-closed branch in the same function.
+- `libs/validation/src/rules/rule-evaluator.spec.ts`: added a regression test constructing a rule
+  with an operator value outside the enum and asserting the function now fails closed with a
+  reason instead of throwing.
+
+## Why
+
+- This is a real, narrowly-scoped correctness/robustness gap in code that otherwise already
+  satisfies ci.loop's readability/maintainability bar (§18) — not a style preference, and not
+  speculative scope creep: it directly undermines a design invariant `ARCH.md` explicitly commits
+  to ("fails closed... rather than silently coercing or silently passing"), which the function
+  itself failed to honor for exactly one input shape. Fix is minimal (one `default` case, no
+  signature change, no new dependency) and adds coverage for a path the existing 12-loop test
+  suite never exercised.
+- Everything else reviewed (module wiring, DI token resolution, cache-invalidation correctness,
+  repository CRUD, DTO/entity nullability, class-validator adapter defaults, error factory
+  indirection) held up under fresh adversarial review — no further defects found, and no cosmetic
+  refactor was applied per §18's explicit prohibition on refactoring already-correct code.
+
+## Tests
+
+1 new test (`rule-evaluator.spec.ts`). `libs/validation` scoped suite: 9 suites / 53 tests passing
+(up from 52). Full repo suite: 133 suites / 1048 tests passing (no regressions; no live infra
+required — existing suite uses fake/in-memory datasources and mocks throughout).
+
+## Build
+
+Not run separately — `npm run typecheck` (below) covers compilation; `nest build` was not
+exercised this loop (no build-affecting change: no new exports, no config/tooling changes).
+
+## Lint
+
+PASS (`npx eslint libs/validation/src`, zero errors/warnings)
+
+## Typecheck
+
+PASS (`npm run typecheck`, zero errors)
+
+## Remaining TODO
+
+- Unchanged from Loop 012: no forced next item. `@Step({ inputSpec })` workflow hook and any
+  further auth-side validation work remain deferred to their own concrete needs (auth's uniqueness
+  checks are already done — see Files Reviewed above, this was previously listed as open but
+  turned out to be already resolved by `libs/auth`'s own loop).
+
+## Next Loop
+
+- None forced. This loop found and fixed one real Medium-severity fail-closed gap; no further
+  issues surfaced on adversarial re-review. Per ci.loop §16, further work should wait for a
+  concrete requirement or a genuinely new defect, not another speculative pass.

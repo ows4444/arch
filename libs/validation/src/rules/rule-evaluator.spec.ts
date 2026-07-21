@@ -179,6 +179,18 @@ describe('evaluateStoredRule', () => {
     expect(result.reason).toMatch(/array/);
   });
 
+  it('fails closed with a reason for an unrecognized operator instead of throwing', () => {
+    // Simulates a stored row with an operator outside the enum (e.g. written/edited outside the
+    // DTO-validated admin API, or a future enum member the evaluator hasn't been updated for) —
+    // the DTO layer normally prevents this, but the evaluator must not crash if it ever happens.
+    const result = evaluateStoredRule(
+      { quantity: 5 },
+      rule({ operator: 'not_a_real_operator' as ValidationRuleOperator }),
+    );
+    expect(result.satisfied).toBe(false);
+    expect(result.reason).toMatch(/unknown operator/);
+  });
+
   it('compareField works with contains/not_contains — the other field becomes the needle', () => {
     const containsSpec = rule({
       operator: ValidationRuleOperator.CONTAINS,

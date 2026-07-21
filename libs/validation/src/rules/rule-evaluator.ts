@@ -77,6 +77,17 @@ export function evaluateStoredRule(
 
     case ValidationRuleOperator.NOT_CONTAINS:
       return evaluateContains(rule, fieldValue, comparisonValue, false);
+
+    default:
+      // Every declared `ValidationRuleOperator` member is handled above. This branch only runs
+      // for a stored `operator` value that doesn't match any of them (e.g. a row written/edited
+      // outside the DTO-validated admin API, or a future enum member added without updating this
+      // switch) — fail closed with a reason instead of falling off the end of the switch and
+      // returning `undefined`, which would throw when the caller reads `.satisfied`.
+      return {
+        satisfied: false,
+        reason: `Rule #${rule.id}: unknown operator "${String(rule.operator)}"`,
+      };
   }
 }
 
