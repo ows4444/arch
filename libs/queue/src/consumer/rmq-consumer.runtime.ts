@@ -12,6 +12,7 @@ import { RMQContextFactory } from '../context/rmq-context.factory';
 import { HandlerTimeoutError } from '../errors/handler-timeout.error';
 import { QueueConfigurationError } from '../errors/queue-configuration.error';
 import { RetryableMessageError } from '../errors/retryable-message.error';
+import { UnroutableMessageError } from '../errors/unroutable-message.error';
 import { QUEUE_INBOX_SERVICE } from '../queue.constants';
 import type { QueueInboxService } from '../inbox/queue-inbox.service';
 import { classifyPublishError } from '../publisher/rmq-publish-error.utils';
@@ -219,11 +220,20 @@ export class RMQConsumerRuntime implements OnModuleInit, OnApplicationShutdown {
             ? classifyPublishError(publishError).rejected
             : false;
         const isConfigError = publishError instanceof QueueConfigurationError;
+        // The retry queue itself doesn't exist / can't be routed to (a
+        // topology/config mismatch between the decorator's retryPolicy and
+        // what TopologyBootstrap declared). Requeuing would redeliver
+        // immediately, hit the same unroutable retry-publish again, and
+        // loop indefinitely with no backoff — same "won't self-heal" class
+        // of failure as isConfigError/isRetryQueueFull, so it must not
+        // requeue either.
+        const isUnroutable = publishError instanceof UnroutableMessageError;
 
         this.logger.error({
           message: 'Failed to publish retry message',
           queue: handler.options.queue,
           retryQueueFull: isRetryQueueFull,
+          retryQueueUnroutable: isUnroutable,
           error:
             publishError instanceof Error
               ? publishError.message
@@ -232,7 +242,7 @@ export class RMQConsumerRuntime implements OnModuleInit, OnApplicationShutdown {
 
         this.safeNack(settlement, {
           queue: handler.options.queue,
-          requeue: !isRetryQueueFull && !isConfigError,
+          requeue: !isRetryQueueFull && !isConfigError && !isUnroutable,
         });
 
         return;

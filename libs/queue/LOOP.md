@@ -246,3 +246,182 @@ PASS (`npm run lint`)
   growing an async variant first — nothing actionable in `libs/queue` itself
   right now. Absent new findings, this library is at a natural stopping
   point per Section 16 (no Critical/High open, tests/build/lint green).
+
+# Loop 003
+
+**Library:** libs/queue
+**Date:** 2026-07-21
+
+## Goal
+
+Standard Improvement Loop pass, prompted in part by a sibling loop on
+`libs/database` that fixed a CRITICAL `TransactionExecutor` bug (commit/
+rollback hooks were firing based on when the user callback settled rather
+than when the physical COMMIT/ROLLBACK actually executed against the
+`QueryRunner`, plus a stray second `commit()` call on `REQUIRES_NEW`). Since
+`libs/queue`'s outbox/inbox reliability patterns depend on transactional
+correctness, this loop's primary mandate was to determine whether that bug
+could have affected `libs/queue`, then run a normal adversarial Phase 1/2
+pass over the rest of the library.
+
+## Files Reviewed
+
+- All of `libs/queue/src/**/*.ts` (connection, publisher, consumer runtime,
+  context/header parsing, outbox, inbox, topology bootstrap/builder, retry
+  topology/naming, errors, utils, persistence entities/migrations,
+  `queue.module.ts`, `queue.types.ts`).
+- `libs/database/src/transaction/transaction.executor.ts` (post-fix version)
+  and a grep across `libs/queue/src` for any use of
+  `runOnTransactionCommit`/`runOnTransactionRollback`/`runOnTransactionComplete`
+  — see "Cross-check with libs/database" below.
+
+## Cross-check with libs/database
+
+**Finding: `libs/queue` is unaffected by the `TransactionExecutor` hook-timing
+bug — it never used commit/rollback hooks in the first place.**
+
+- Grepped `libs/queue/src` for `runOnTransactionCommit`, `runOnTransactionRollback`,
+  `runOnTransactionComplete`, and `REQUIRES_NEW`/`Propagation` usage: zero
+  matches. The outbox/inbox code doesn't hook into transaction lifecycle
+  events at all.
+- `OutboxService.enqueue` (`outbox/outbox.service.ts`) just calls
+  `this.outbox.insert(...)` through `BaseRepository`, which resolves the
+  active `EntityManager` from `transactionContext` — it runs inside whatever
+  ambient `@Transactional()` the host app wrapped around the business write,
+  with no hook dependency. Its correctness rests on `TransactionExecutor`
+  committing/rolling back the ambient transaction correctly, which the
+  sibling loop's fix strengthened rather than changed the contract of.
+- `DatabaseQueueInboxService.withIdempotency` (`inbox/database-queue-inbox.service.ts`)
+  calls `this.transactionExecutor.execute(callback)` directly with no
+  `propagation` option — the inbox-row insert and the handler body run
+  inside `TransactionExecutor`'s default (REQUIRED) path, committing/rolling
+  back synchronously via `runOwnedTransaction`/the "already active" branch.
+  There is no `runOnTransactionCommit`/`Rollback` call anywhere in this path
+  for the fixed hook-ordering bug to have affected.
+- `OutboxDispatcherService.sweep`/`dispatch` don't run inside a
+  `@Transactional()` at all — `OutboxRepository.claimBatch` uses a
+  claim-then-conditional-UPDATE pattern (SELECT candidate ids, then
+  `UPDATE ... WHERE status = :pending OR (...)`), which is safe under plain
+  autocommit row-level locking, not `TransactionExecutor`.
+- Conclusion: no code change needed on the `libs/queue` side for this cross-check.
+
+## Problems Found
+
+**Critical**
+- None.
+
+**High**
+- None.
+
+**Medium**
+- `RMQConsumerRuntime.consumeMessage`'s retry-publish failure handler
+  (`consumer/rmq-consumer.runtime.ts`) only excluded `QueueConfigurationError`
+  and "retry queue full" (`classifyPublishError(...).rejected`) from the
+  requeue path; every other publish error — including `UnroutableMessageError`
+  (the retry queue itself doesn't exist, e.g. a mismatch between the
+  `@RMQConsumer` decorator's `retryPolicy` and what `TopologyBootstrap`
+  declared at startup) — fell through to `requeue: true`. That nacks the
+  original message back onto its own queue for immediate redelivery, which
+  hits the same unroutable retry-publish again on the next attempt: a tight,
+  unbounded retry loop with no backoff, hammering the broker. Genuine
+  DLQ/retry-semantics gap per ci.loop §8, distinct from the (correctly
+  requeued) transient-connection-error case, which must keep requeuing.
+
+**Low**
+- None newly identified this pass; see "Considered, not changed" below for
+  items re-examined but left as-is.
+
+**Considered, not changed**
+- The inbox-transaction-scope tradeoff from Loop 001 (handler body runs
+  inside the same DB transaction as the inbox-row insert) — re-examined
+  given the `libs/database` cross-check context above; still correct and
+  unaffected, no change warranted.
+- A slow/timed-out handler's original `invokeHandler` promise (wrapping the
+  inbox transaction) keeps running in the background after
+  `HandlerTimeoutError` triggers a retry-publish, since the DB
+  query/transaction can't actually be cancelled via `AbortSignal`. Traced
+  the resulting scenarios: if the original handler eventually commits, the
+  redelivered retry's inbox insert hits a duplicate-key conflict and is
+  correctly skipped as already-processed (idempotency working as intended);
+  if it rolls back, the retry's insert succeeds fresh. The only edge case is
+  a redelivered retry blocking on the still-open original transaction's row
+  lock until it settles (or the DB's lock-wait-timeout) — a pre-existing,
+  already-documented tradeoff (Loop 001), not something this loop's scope
+  covers introducing a fix for (would need a real incident to justify,
+  per §17 "every refactor must have measurable value").
+- `RMQConnection`'s hard-coded retry/backoff/prefetch constants — still no
+  concrete driving use case; left as-is per Loop 002's reasoning.
+- `TopologyBootstrap`'s raw (non-managed) AMQP connection stays open for the
+  app's full lifetime after the one-time startup bootstrap completes. Mildly
+  wasteful but deliberate (simplifies sequential `assertQueue`/`assertExchange`
+  bootstrap flow vs. `ChannelWrapper`'s queued-setup semantics) and not a
+  correctness issue; not touched.
+
+## Changes Made
+
+- `libs/queue/src/consumer/rmq-consumer.runtime.ts`: added an
+  `isUnroutable = publishError instanceof UnroutableMessageError` check
+  alongside the existing `isRetryQueueFull`/`isConfigError` checks in the
+  retry-publish failure handler, excluding it from `requeue` the same way,
+  and added a `retryQueueUnroutable` field to the existing error log for
+  observability.
+- `libs/queue/src/consumer/rmq-consumer.runtime.spec.ts`: added a regression
+  test ("nacks without requeue when the retry-publish fails because the
+  retry queue is unroutable") asserting `channel.nack` is called with
+  `requeue: false` when `publisher.publish` rejects with
+  `UnroutableMessageError`, distinct from the existing transient-error test
+  (generic `Error('connection closed')`) which still asserts `requeue: true`.
+
+## Why
+
+- The fix is narrowly scoped to a genuinely unbounded-retry-loop hazard
+  (broker-hammering with zero backoff on a real, if uncommon, topology/config
+  mismatch) without touching the legitimate transient-connection-error
+  requeue path, which must keep retrying so messages aren't lost during a
+  broker blip. Consistent with the same reasoning already applied to
+  `isConfigError`/`isRetryQueueFull` in this exact branch.
+- No other Critical/High/Medium issues surfaced despite an adversarial pass
+  over connection lifecycle, topology bootstrap, consumer registration/
+  shutdown ordering, retry/DLQ semantics, header precedence, payload
+  validation, outbox/inbox transactional correctness, and duplicate-delivery
+  handling (ci.loop §8) — Loops 001/002 already closed the substantive gaps
+  in this library, and the `libs/database` cross-check confirmed no
+  hook-timing dependency exists to be affected by that sibling fix.
+
+## Tests
+
+`libs/queue` suite: 25 spec files / 132 tests (up from 25/131), all passing.
+Full monorepo suite: 133 suites / 1047 tests, all passing
+(`npm test`).
+
+## Build
+
+PASS (`npx tsc --noEmit -p tsconfig.json`)
+
+## Lint
+
+PASS (`npm run lint`)
+
+## Remaining TODO
+
+- No `ARCH.md` exists for this library yet; this loop was pure Improvement
+  Loop (Sections 1-19), no Design Mode session preceded it.
+- The inbox-transaction-scope tradeoff (Loop 001) and the timed-out-handler
+  background-transaction edge case (this loop) remain documented, not
+  changed — revisit either only if a real incident (connection-pool
+  exhaustion, or a redelivered retry blocking on a lock) traces back to them.
+- The cross-library `forRootAsync` pattern check against `libs/workflow`
+  (Loop 001/002) remains blocked on that library growing an async variant.
+
+## Next Loop
+
+- No further Critical/High findings identified this pass. If a future loop
+  wants to harden the retry-publish failure classification further, consider
+  whether `classifyPublishError`'s `timeout`/`connectionClosed` categories
+  should be made the explicit allowlist for `requeue: true` (rather than
+  today's implicit "anything not known-permanent" default) — not done this
+  loop since the current default already correctly handles the common
+  transient-failure case and no concrete failure besides `UnroutableMessageError`
+  surfaced needing the stricter treatment.
+- Absent new findings, this library remains at a natural stopping point per
+  Section 16 (no Critical/High open, tests/build/lint green).

@@ -10,6 +10,7 @@ import { TopologyBootstrap } from '../topology/topology.bootstrap';
 import { RMQPublisher } from '../publisher/rmq.publisher';
 import { RetryableMessageError } from '../errors/retryable-message.error';
 import { NonRetryableMessageError } from '../errors/non-retryable-message.error';
+import { UnroutableMessageError } from '../errors/unroutable-message.error';
 import { RMQ_HEADERS } from '../queue.constants';
 import type { QueueInboxService } from '../inbox/queue-inbox.service';
 
@@ -213,6 +214,33 @@ describe('RMQConsumerRuntime message settlement', () => {
 
     expect(channel.ack).not.toHaveBeenCalled();
     expect(channel.nack).toHaveBeenCalledWith(expect.anything(), false, true);
+  });
+
+  it('nacks without requeue when the retry-publish fails because the retry queue is unroutable (regression)', async () => {
+    const channel = fakeChannel();
+    const publisher = fakePublisher({
+      publish: jest.fn().mockRejectedValue(
+        new UnroutableMessageError({
+          exchange: '',
+          routingKey: 'ex.q1.retry.5s',
+          messageId: 'msg-1',
+        }),
+      ),
+    });
+    const runtime = buildRuntime(publisher);
+    const handler = fakeHandler(
+      () => Promise.reject(new RetryableMessageError('transient')),
+      { retryPolicy: { strategy: [5, 10] } },
+    );
+
+    await (runtime as unknown as RuntimeWithPrivateAccess).consumeMessage({
+      channel,
+      message: fakeMessage(),
+      handler,
+    });
+
+    expect(channel.ack).not.toHaveBeenCalled();
+    expect(channel.nack).toHaveBeenCalledWith(expect.anything(), false, false);
   });
 
   it('does not decrement the inflight count until the handler actually finishes, even after it times out (regression)', async () => {
