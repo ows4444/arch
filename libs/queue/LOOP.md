@@ -425,3 +425,95 @@ PASS (`npm run lint`)
   surfaced needing the stricter treatment.
 - Absent new findings, this library remains at a natural stopping point per
   Section 16 (no Critical/High open, tests/build/lint green).
+
+---
+
+# Loop 004
+
+**Library:** libs/queue
+**Date:** 2026-07-22
+
+## Goal
+
+Implement the hardening Loop 003 explicitly named in its Next Loop note, per direct user request:
+make `classifyPublishError`'s `timeout`/`connectionClosed` categories the explicit allowlist for
+`requeue: true` on a failed retry-publish, rather than the implicit "anything not known-permanent"
+denylist default.
+
+## Files Reviewed
+
+- `libs/queue/src/consumer/rmq-consumer.runtime.ts`
+- `libs/queue/src/publisher/rmq-publish-error.utils.ts`
+- `libs/queue/src/consumer/rmq-consumer.runtime.spec.ts`
+
+## Problems Found
+
+**Critical**
+- None
+
+**High**
+- None
+
+**Medium**
+- Confirmed the gap Loop 003 flagged: `classifyPublishError()` computes `timeout` and
+  `connectionClosed` flags, but the retry-publish failure handler only ever read `.rejected`
+  (as `isRetryQueueFull`). Any publish error not matching `isRetryQueueFull`/`isConfigError`/
+  `isUnroutable` — including the `timeout` category itself, and any future/unrecognized failure
+  message — fell through to the implicit `requeue: true` default. That's the same unbounded,
+  no-backoff retry-storm shape Loop 003 fixed for `UnroutableMessageError`, just reachable via any
+  error the classifier doesn't explicitly name.
+- While adding regression coverage, found the "retry queue full" (`rejected`) case had no test at
+  all — only the transient (`connectionClosed`) and unroutable cases were covered. Added one.
+
+**Low**
+- None
+
+## Changes Made
+
+- `rmq-consumer.runtime.ts`: replaced the denylist (`!isRetryQueueFull && !isConfigError &&
+  !isUnroutable`) with an explicit allowlist (`isTransient = !isConfigError && !isUnroutable &&
+  (classification?.timeout || classification?.connectionClosed)`). `requeue` is now `isTransient`
+  directly. The `retryQueueFull` log field is preserved (now read from `classification?.rejected`)
+  for observability parity — it just no longer participates in the requeue decision directly, since
+  `rejected` was never part of the new allowlist to begin with (it's implicitly excluded, same
+  outcome as before).
+- `rmq-consumer.runtime.spec.ts`: added two regression tests — "retry queue is full" (`rejected`,
+  previously untested, requeue: false) and "unrecognized error" (matches none of the three known
+  patterns, requeue: false — this is the actual behavior change; previously this fell through to
+  `true`).
+
+## Why
+
+Direct user request to close the exact gap Loop 003 named and deliberately deferred. The
+allowlist-over-denylist framing is strictly safer for a retry-publish failure handler: a new or
+unrecognized broker failure mode is far more likely to be another "won't self-heal quickly" case
+(config drift, protocol change, a broker version quirk) than a genuinely transient one — defaulting
+to no-requeue on the unknown case avoids silently reintroducing an unbounded retry storm the next
+time the broker fails in a way nobody anticipated, at the cost of that one message needing an
+operator to requeue it manually (or relying on the DLQ, which the consumer already nacks to when
+`requeue: false`, so no message is lost).
+
+## Tests
+
+`libs/queue` suite: 25 spec files / 134 tests (up from 25/132 — two new regression tests). Full
+monorepo suite: 133 suites / 1051 tests, all passing.
+
+## Build
+
+PASS (`npm run typecheck` — `tsc --noEmit`)
+
+## Lint
+
+PASS (`npm run lint`)
+
+## Remaining TODO
+
+- None new. Loop 003's other Remaining TODO items (inbox-transaction-scope tradeoff, timed-out-handler
+  background-transaction edge case, `RMQConnection`'s hard-coded constants, `TopologyBootstrap`'s
+  long-lived raw connection) are unchanged — none intersect this loop's scope.
+
+## Next Loop
+
+- No further Critical/High findings. This library remains at a natural stopping point per Section 16
+  (no Critical/High open, tests/build/lint green) until a new concrete finding or user request
+  surfaces.

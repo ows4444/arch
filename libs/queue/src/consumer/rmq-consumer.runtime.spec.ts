@@ -243,6 +243,52 @@ describe('RMQConsumerRuntime message settlement', () => {
     expect(channel.nack).toHaveBeenCalledWith(expect.anything(), false, false);
   });
 
+  it('nacks without requeue when the retry-publish fails because the retry queue is full (regression)', async () => {
+    const channel = fakeChannel();
+    const publisher = fakePublisher({
+      publish: jest
+        .fn()
+        .mockRejectedValue(new Error('reject-publish: queue at max-length')),
+    });
+    const runtime = buildRuntime(publisher);
+    const handler = fakeHandler(
+      () => Promise.reject(new RetryableMessageError('transient')),
+      { retryPolicy: { strategy: [5, 10] } },
+    );
+
+    await (runtime as unknown as RuntimeWithPrivateAccess).consumeMessage({
+      channel,
+      message: fakeMessage(),
+      handler,
+    });
+
+    expect(channel.ack).not.toHaveBeenCalled();
+    expect(channel.nack).toHaveBeenCalledWith(expect.anything(), false, false);
+  });
+
+  it('nacks without requeue when the retry-publish fails with an unrecognized error (regression: explicit allowlist, not a denylist)', async () => {
+    const channel = fakeChannel();
+    const publisher = fakePublisher({
+      publish: jest
+        .fn()
+        .mockRejectedValue(new Error('something unexpected happened')),
+    });
+    const runtime = buildRuntime(publisher);
+    const handler = fakeHandler(
+      () => Promise.reject(new RetryableMessageError('transient')),
+      { retryPolicy: { strategy: [5, 10] } },
+    );
+
+    await (runtime as unknown as RuntimeWithPrivateAccess).consumeMessage({
+      channel,
+      message: fakeMessage(),
+      handler,
+    });
+
+    expect(channel.ack).not.toHaveBeenCalled();
+    expect(channel.nack).toHaveBeenCalledWith(expect.anything(), false, false);
+  });
+
   it('does not decrement the inflight count until the handler actually finishes, even after it times out (regression)', async () => {
     jest.useFakeTimers();
 

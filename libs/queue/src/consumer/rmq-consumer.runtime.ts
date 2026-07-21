@@ -215,24 +215,38 @@ export class RMQConsumerRuntime implements OnModuleInit, OnApplicationShutdown {
         outcome = 'retry-scheduled';
         retryCountForLog = retryDecision.retryCount + 1;
       } catch (publishError: unknown) {
-        const isRetryQueueFull =
+        const classification =
           publishError instanceof Error
-            ? classifyPublishError(publishError).rejected
-            : false;
+            ? classifyPublishError(publishError)
+            : undefined;
         const isConfigError = publishError instanceof QueueConfigurationError;
         // The retry queue itself doesn't exist / can't be routed to (a
         // topology/config mismatch between the decorator's retryPolicy and
         // what TopologyBootstrap declared). Requeuing would redeliver
         // immediately, hit the same unroutable retry-publish again, and
         // loop indefinitely with no backoff — same "won't self-heal" class
-        // of failure as isConfigError/isRetryQueueFull, so it must not
+        // of failure as isConfigError/a full retry queue, so it must not
         // requeue either.
         const isUnroutable = publishError instanceof UnroutableMessageError;
+        // Explicit allowlist, not a denylist: only requeue for failures
+        // recognized as actually transient (a busy/closing broker
+        // connection). Everything else — including any publish error this
+        // classifier doesn't recognize at all — defaults to no-requeue.
+        // Requeuing on an unclassified failure risks the exact same
+        // unbounded, no-backoff retry loop that made the isConfigError/
+        // isUnroutable exclusions necessary in the first place: a new or
+        // unrecognized failure mode is far more likely to be another
+        // "won't self-heal quickly" case than a genuinely transient one.
+        const isTransient =
+          !isConfigError &&
+          !isUnroutable &&
+          (classification?.timeout || classification?.connectionClosed) ===
+            true;
 
         this.logger.error({
           message: 'Failed to publish retry message',
           queue: handler.options.queue,
-          retryQueueFull: isRetryQueueFull,
+          retryQueueFull: classification?.rejected ?? false,
           retryQueueUnroutable: isUnroutable,
           error:
             publishError instanceof Error
@@ -242,7 +256,7 @@ export class RMQConsumerRuntime implements OnModuleInit, OnApplicationShutdown {
 
         this.safeNack(settlement, {
           queue: handler.options.queue,
-          requeue: !isRetryQueueFull && !isConfigError && !isUnroutable,
+          requeue: isTransient,
         });
 
         return;
