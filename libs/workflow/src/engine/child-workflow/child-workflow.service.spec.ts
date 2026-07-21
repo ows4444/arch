@@ -837,8 +837,13 @@ describe('ChildWorkflowService', () => {
     });
 
     it("checks join quorum after an 'ignore'-policy child permanently fails", async () => {
-      const { service, stateService, executor, registeredParent, flushAfterCommit } =
-        setup();
+      const {
+        service,
+        stateService,
+        executor,
+        registeredParent,
+        flushAfterCommit,
+      } = setup();
       (
         registeredParent.metadata.childWorkflows[0]! as {
           failurePolicy: string;
