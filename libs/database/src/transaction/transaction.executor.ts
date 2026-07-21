@@ -67,49 +67,18 @@ export class TransactionExecutor {
       options?.propagation === TransactionPropagation.REQUIRES_NEW &&
       !options.queryRunner
     ) {
-      const dataSource = this.dataSourceManager.dataSource(DatabaseRole.WRITE);
-
-      const runner = dataSource.createQueryRunner();
-
-      await runner.connect();
-
-      try {
-        if (options.isolationLevel) {
-          await runner.startTransaction(options.isolationLevel);
-        } else {
-          await runner.startTransaction();
-        }
-
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        const { manager: _manager, ...restOptions } = options;
-
-        const result = await transactionContext.runWithoutTransaction(() =>
-          this.execute(callback, {
-            ...restOptions,
-            queryRunner: runner,
-          }),
-        );
-
-        await runner.commitTransaction();
-
-        await transactionContext.commit();
-
-        return result;
-      } catch (error) {
-        try {
-          await runner.rollbackTransaction();
-        } catch {
-          // Preserve the original application error.
-        }
-
-        if (error instanceof Error) {
-          await transactionContext.rollback(error);
-        }
-
-        throw error;
-      } finally {
-        await runner.release();
-      }
+      // Suspend any ambient transaction so the new transaction's manager and
+      // commit/rollback hooks are fully independent of it, then delegate to
+      // the same owned-transaction runner the default (fresh-REQUIRED) path
+      // uses below — see `runOwnedTransaction` for why hook firing has to be
+      // ordered after the physical COMMIT/ROLLBACK, not merely after the
+      // callback settles.
+      return transactionContext.runWithoutTransaction(() =>
+        this.runOwnedTransaction(callback, {
+          isolationLevel: options.isolationLevel,
+          timeoutMs: options.timeoutMs,
+        }),
+      );
     }
 
     if (
@@ -167,16 +136,83 @@ export class TransactionExecutor {
       }
     }
 
-    const transaction = async (manager: EntityManager): Promise<T> => {
-      const operation = async (): Promise<T> => {
-        return transactionContext.run(manager, async () => {
+    // A caller-supplied manager/queryRunner means the caller owns the actual
+    // transaction boundary (they started it, and they're responsible for
+    // committing/rolling it back elsewhere) — this method only runs the
+    // callback inside it and fires hooks once the callback settles, since
+    // there is no physical commit happening here to order against.
+    if (options?.manager) {
+      return this.runWithAmbientManager(callback, options.manager, options);
+    }
+
+    if (options?.queryRunner) {
+      return this.runWithAmbientManager(
+        callback,
+        options.queryRunner.manager,
+        options,
+      );
+    }
+
+    // No caller-supplied manager and no ambient transaction: this call owns
+    // the transaction outright, so hook firing can and must be ordered
+    // against the physical COMMIT/ROLLBACK (see `runOwnedTransaction`).
+    return this.runOwnedTransaction(callback, {
+      isolationLevel: options?.isolationLevel,
+      timeoutMs: options?.timeoutMs,
+    });
+  }
+
+  /**
+   * Runs `callback` inside a transaction this method creates and fully owns
+   * (via a manually-driven `QueryRunner`, not `EntityManager.transaction()`)
+   * — used for both a fresh `REQUIRED` transaction and `REQUIRES_NEW`.
+   *
+   * Hook ordering is the reason this doesn't just use
+   * `dataSource.transaction()`: that helper calls the callback and only
+   * physically commits *after* the callback's promise resolves, with no hook
+   * exposed in between. Committing/rolling back manually — and only firing
+   * `transactionContext.commit()`/`rollback()` after that physical
+   * COMMIT/ROLLBACK settles, while still inside the transaction's
+   * `AsyncLocalStorage` context — guarantees commit-hook side effects (e.g.
+   * an outbox dispatch signal via `runOnTransactionCommit`) never run before
+   * the data they depend on is actually durable, and never run at all if the
+   * physical COMMIT itself fails.
+   */
+  private async runOwnedTransaction<T>(
+    callback: () => Promise<T>,
+    options: {
+      isolationLevel?: IsolationLevel | undefined;
+      timeoutMs?: number | undefined;
+    },
+  ): Promise<T> {
+    const dataSource = this.dataSourceManager.dataSource(DatabaseRole.WRITE);
+    const runner = dataSource.createQueryRunner();
+
+    await runner.connect();
+
+    try {
+      if (options.isolationLevel) {
+        await runner.startTransaction(options.isolationLevel);
+      } else {
+        await runner.startTransaction();
+      }
+
+      const operation = (): Promise<T> =>
+        transactionContext.run(runner.manager, async () => {
           try {
             const result = await callback();
 
+            await runner.commitTransaction();
             await transactionContext.commit();
 
             return result;
           } catch (error) {
+            try {
+              await runner.rollbackTransaction();
+            } catch {
+              // Preserve the original application error.
+            }
+
             if (error instanceof Error) {
               await transactionContext.rollback(error);
             }
@@ -184,65 +220,82 @@ export class TransactionExecutor {
             throw error;
           }
         });
-      };
 
-      if (!options?.timeoutMs) {
-        return operation();
-      }
+      return options.timeoutMs
+        ? await this.runWithTimeout(operation, options.timeoutMs)
+        : await operation();
+    } finally {
+      await runner.release();
+    }
+  }
 
-      const operationPromise = operation();
+  /** See the `options?.manager`/`options?.queryRunner` branches in `execute()`. */
+  private runWithAmbientManager<T>(
+    callback: () => Promise<T>,
+    manager: EntityManager,
+    options: Pick<TransactionOptions, 'timeoutMs'>,
+  ): Promise<T> {
+    const operation = (): Promise<T> =>
+      transactionContext.run(manager, async () => {
+        try {
+          const result = await callback();
 
-      let timer: NodeJS.Timeout | undefined;
-      let timedOut = false;
+          await transactionContext.commit();
 
-      const timeoutPromise = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-          timedOut = true;
-          reject(
-            new Error(
-              `Transaction exceeded timeout (${options.timeoutMs} ms).`,
-            ),
-          );
-        }, options.timeoutMs);
+          return result;
+        } catch (error) {
+          if (error instanceof Error) {
+            await transactionContext.rollback(error);
+          }
+
+          throw error;
+        }
       });
 
-      try {
-        return await Promise.race([operationPromise, timeoutPromise]);
-      } catch (error) {
-        if (timedOut) {
-          this.logger.warn(
-            `Transaction exceeded timeout (${options.timeoutMs} ms); waiting for it to finish rather than aborting, since the in-flight query cannot be cancelled.`,
-          );
+    return options.timeoutMs
+      ? this.runWithTimeout(operation, options.timeoutMs)
+      : operation();
+  }
 
-          return await operationPromise;
-        }
+  /**
+   * Races `operation` against `timeoutMs`. On timeout, logs and waits for
+   * the real operation to finish rather than abandoning it — the in-flight
+   * query/transaction can't actually be cancelled, so racing ahead here
+   * would let the caller move on while the transaction's commit/rollback
+   * (and its hooks) are still pending in the background.
+   */
+  private async runWithTimeout<T>(
+    operation: () => Promise<T>,
+    timeoutMs: number,
+  ): Promise<T> {
+    const operationPromise = operation();
 
-        if (error instanceof Error) {
-          await transactionContext.rollback(error);
-        }
+    let timer: NodeJS.Timeout | undefined;
+    let timedOut = false;
 
-        throw error;
-      } finally {
-        if (timer) {
-          clearTimeout(timer);
-        }
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        timedOut = true;
+        reject(new Error(`Transaction exceeded timeout (${timeoutMs} ms).`));
+      }, timeoutMs);
+    });
+
+    try {
+      return await Promise.race([operationPromise, timeoutPromise]);
+    } catch (error) {
+      if (timedOut) {
+        this.logger.warn(
+          `Transaction exceeded timeout (${timeoutMs} ms); waiting for it to finish rather than aborting, since the in-flight query cannot be cancelled.`,
+        );
+
+        return await operationPromise;
       }
-    };
 
-    if (options?.manager) {
-      return transaction(options.manager);
+      throw error;
+    } finally {
+      if (timer) {
+        clearTimeout(timer);
+      }
     }
-
-    if (options?.queryRunner) {
-      return transaction(options.queryRunner.manager);
-    }
-
-    const dataSource = this.dataSourceManager.dataSource(DatabaseRole.WRITE);
-
-    if (options?.isolationLevel) {
-      return dataSource.transaction(options.isolationLevel, transaction);
-    }
-
-    return dataSource.transaction(transaction);
   }
 }

@@ -354,3 +354,158 @@ PASS
 - No Critical/High findings remain open. Next loop would be a fresh Phase
   1/2 pass on `libs/cache`, `libs/queue`, or `libs/workflow`, or a Design
   Mode session if scope is being deliberately extended.
+
+---
+
+# Loop 005
+
+**Library:** libs/database
+**Date:** 2026-07-21
+
+## Goal
+
+Fresh, adversarial Phase 1/2 pass with no open backlog (Loop 004 closed
+everything) — read the transaction-commit path end to end rather than
+re-verifying already-tested behavior, on the theory that the commit/rollback
+hook mechanism (`runOnTransactionCommit`/`runOnTransactionRollback`/
+`runOnTransactionComplete`, `transaction.hooks.ts`) had never itself been
+adversarially reviewed in prior loops (Loops 001-004 focused on the
+reader-pin/retry/resolver machinery).
+
+## Files Reviewed
+
+- `transaction/transaction.executor.ts` — every propagation branch
+  (`NOT_SUPPORTED`, `REQUIRES_NEW`, `MANDATORY`, `NEVER`, `SUPPORTS`,
+  ambient-join, `NESTED`, default fresh-`REQUIRED`), cross-checked against
+  `node_modules/typeorm/entity-manager/EntityManager.js`'s actual
+  `transaction()` implementation to confirm exactly when TypeORM issues the
+  physical `COMMIT`.
+- `transaction/transaction.context.ts`, `transaction/transaction.hooks.ts` —
+  how `commit()`/`rollback()` read and clear the `AsyncLocalStorage`-scoped
+  hooks `Set`s.
+- `transaction/transaction.executor.spec.ts`,
+  `transaction/transaction-hooks.integration.spec.ts` (real `better-sqlite3`
+  `DataSource`) — confirmed no existing test asserted hook-firing order
+  relative to the physical `COMMIT`/`ROLLBACK`, only relative to the
+  callback's own resolution.
+- `libs/workflow/src/persistence/adapters/database/database-workflow-transaction-runner.ts`
+  — confirmed a real consumer (`DatabaseWorkflowTransactionRunner.afterCommit()`)
+  is built directly on `runOnTransactionCommit()`, i.e. a real caller depends
+  on "after commit" meaning "after the data is durably committed."
+
+## Problems Found
+
+**Critical**
+- `TransactionExecutor`'s commit/rollback hooks fired based on when the
+  user's callback settled, not when the transaction's physical
+  `COMMIT`/`ROLLBACK` actually executed. For the default (fresh `REQUIRED`)
+  path, `dataSource.transaction(transaction)` delegates to TypeORM's
+  `EntityManager.transaction()`, whose own source is:
+  `const result = await runInTransaction(queryRunner.manager); await
+  queryRunner.commitTransaction();` — i.e. TypeORM always commits *after*
+  our callback (`transaction`) resolves. Our `transaction` callback called
+  `transactionContext.commit()` (firing every `runOnTransactionCommit()`/
+  `runOnTransactionComplete()` hook) from *inside* itself, strictly *before*
+  TypeORM's own `commitTransaction()` ran. `REQUIRES_NEW` had the same bug
+  via its recursive `this.execute()` call, plus a second, narrower defect:
+  the outer `REQUIRES_NEW` code called `transactionContext.commit()` a
+  *second* time after its own `runner.commitTransaction()`, but by then the
+  `AsyncLocalStorage` context had reverted to whatever was active *before*
+  `REQUIRES_NEW` started — meaning that second call operated on an
+  **outer/ambient transaction's hook set** (if `REQUIRES_NEW` was invoked
+  nested inside an active transaction), not the inner transaction's own.
+  Net effect: any commit-hook side effect (e.g. `libs/workflow`'s
+  `DatabaseWorkflowTransactionRunner.afterCommit()`, used to defer work
+  until data is durably committed) could run *before* the physical `COMMIT`
+  — including in the rare case where `COMMIT` itself subsequently fails —
+  silently violating the exact "don't treat an uncertain outcome as
+  certain" guarantee this library already enforces elsewhere (Loop 004's
+  fix, `CLAUDE.md`'s stated write-retry principle). No existing test caught
+  this because all hook tests only asserted hooks fired relative to the
+  callback, never relative to the physical `COMMIT`/`ROLLBACK` call.
+
+**High / Medium / Low**
+- (none)
+
+## Changes Made
+
+- `transaction/transaction.executor.ts`: replaced the default fresh-
+  transaction path's use of `dataSource.transaction(...)` (and
+  `REQUIRES_NEW`'s bespoke queryRunner handling) with a single shared
+  private `runOwnedTransaction()` that manually drives the `QueryRunner`
+  (`connect` → `startTransaction` → run callback inside
+  `transactionContext.run(runner.manager, ...)` → `runner.commitTransaction()`
+  → **then** `transactionContext.commit()`, all still inside the same
+  `AsyncLocalStorage` context; on error, `runner.rollbackTransaction()`
+  **then** `transactionContext.rollback(error)`). `REQUIRES_NEW` now just
+  suspends the ambient transaction (`transactionContext.runWithoutTransaction`)
+  and delegates to the same helper, removing the old recursive
+  `this.execute()` call and its erroneous second `transactionContext.commit()`
+  entirely.
+- Extracted the caller-supplied `options.manager`/`options.queryRunner`
+  branches (where the caller owns the physical commit elsewhere, so
+  firing hooks immediately after the callback settles is already correct)
+  into a small `runWithAmbientManager()` helper — behavior unchanged there.
+- Extracted the timeout-race logic (unchanged behavior: on timeout, log and
+  keep waiting for the real operation rather than abandoning it) into a
+  shared `runWithTimeout()` used by both helpers above. Dropped one
+  dead/no-op `transactionContext.rollback(error)` call that lived in the old
+  timeout-catch block outside any active `AsyncLocalStorage` context (it
+  could never find an active hook set to fire).
+- `transaction/transaction.executor.spec.ts`: updated the three
+  timeout-handling tests and the "NESTED starts a fresh transaction" test to
+  mock `createQueryRunner` instead of `dataSource.transaction` (matching the
+  new mechanism); added assertions that the queryRunner isn't released until
+  the real (post-timeout) operation finishes and that rollback is invoked on
+  a real post-timeout failure.
+- `transaction/transaction-hooks.integration.spec.ts` (real `better-sqlite3`
+  `DataSource`): added two regression tests spying on
+  `runner.commitTransaction`/`runner.rollbackTransaction` to assert the
+  physical commit/rollback always happens **before** the corresponding hook
+  fires (`['callback', 'physical-commit', 'commit-hook']` /
+  `['callback', 'physical-rollback', 'rollback-hook']`).
+
+## Why
+
+- Matches this library's own established, previously-enforced principle
+  (Loop 004; `CLAUDE.md`: writes' commit state must never be treated as
+  certain when it isn't) — the gap here was the same class of bug in a
+  different place: hook-firing timing implicitly assumed "callback resolved"
+  meant "transaction committed," which is false for every code path that
+  starts its own transaction.
+- Cross-checked against `libs/queue` and `libs/workflow` per the loop's
+  cross-lib-consistency instruction: `libs/queue`'s outbox/inbox don't use
+  `runOnTransactionCommit`/`TransactionExecutor` directly (they drive their
+  own repository writes inside the caller's `@Transactional()`/outer
+  transaction), so they're unaffected. `libs/workflow`'s
+  `DatabaseWorkflowTransactionRunner.execute()`/`.executeOrJoin()` call
+  `TransactionExecutor.execute(operation)` with no options — exactly the
+  default fresh-`REQUIRED` path this loop fixed — and its `afterCommit()` is
+  a thin wrapper over `runOnTransactionCommit()`, so it now gets the
+  ordering guarantee its name implies.
+
+## Tests
+
+Added 5 new tests (2 in `transaction.executor.spec.ts`'s assertions extended
+in place, 2 new in `transaction-hooks.integration.spec.ts`, plus 1 new
+assertion in the NESTED test). `libs/database` suite: 16 suites / 146 tests
+(up from 144), all passing. Full monorepo suite: 133 suites / 1046 tests, all
+passing.
+
+## Build
+
+PASS (`npm run typecheck`)
+
+## Lint
+
+PASS (`npm run lint`)
+
+## Remaining TODO
+
+- None outstanding for this library.
+
+## Next Loop
+
+- No Critical/High findings remain open. Next loop would be a fresh Phase
+  1/2 pass on `libs/cache`, `libs/queue`, or `libs/workflow`, or a Design
+  Mode session if scope is being deliberately extended.

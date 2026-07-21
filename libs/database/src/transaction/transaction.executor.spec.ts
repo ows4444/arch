@@ -46,8 +46,9 @@ function deferred<T>() {
 
 describe('TransactionExecutor timeout handling', () => {
   it('resolves normally when the operation finishes before the timeout', async () => {
+    const runner = fakeQueryRunner();
     const dataSourceManager = fakeDataSourceManager({
-      transaction: async (fn) => fn({} as EntityManager),
+      createQueryRunner: () => runner,
     });
     const executor = new TransactionExecutor(dataSourceManager);
 
@@ -56,21 +57,18 @@ describe('TransactionExecutor timeout handling', () => {
     ).resolves.toBe('done');
   });
 
-  it('does not let the surrounding transaction wrapper release before the real operation finishes, even after the timeout elapses', async () => {
+  it('does not release the queryRunner before the real operation finishes, even after the timeout elapses', async () => {
     const events: string[] = [];
     const work = deferred<string>();
 
+    const runner = fakeQueryRunner();
+    (runner.commitTransaction as jest.Mock).mockImplementation(() => {
+      events.push('physical-commit');
+      return Promise.resolve();
+    });
+
     const dataSourceManager = fakeDataSourceManager({
-      transaction: async (fn) => {
-        try {
-          const result = await fn({} as EntityManager);
-          events.push('wrapper-settled-commit');
-          return result;
-        } catch (error) {
-          events.push('wrapper-settled-rollback');
-          throw error;
-        }
-      },
+      createQueryRunner: () => runner,
     });
 
     const executor = new TransactionExecutor(dataSourceManager);
@@ -87,6 +85,7 @@ describe('TransactionExecutor timeout handling', () => {
     await new Promise((resolve) => setTimeout(resolve, 30));
 
     expect(events).toEqual(['callback-start']);
+    expect(runner.release).not.toHaveBeenCalled();
 
     work.resolve('real-result');
 
@@ -94,15 +93,17 @@ describe('TransactionExecutor timeout handling', () => {
     expect(events).toEqual([
       'callback-start',
       'callback-end',
-      'wrapper-settled-commit',
+      'physical-commit',
     ]);
+    expect(runner.release).toHaveBeenCalledTimes(1);
   });
 
   it('propagates the operation real failure (not a timeout error) if it fails after timing out', async () => {
     const work = deferred<string>();
 
+    const runner = fakeQueryRunner();
     const dataSourceManager = fakeDataSourceManager({
-      transaction: async (fn) => fn({} as EntityManager),
+      createQueryRunner: () => runner,
     });
     const executor = new TransactionExecutor(dataSourceManager);
 
@@ -116,6 +117,7 @@ describe('TransactionExecutor timeout handling', () => {
     work.reject(realError);
 
     await expect(executePromise).rejects.toBe(realError);
+    expect(runner.rollbackTransaction).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -376,8 +378,9 @@ describe('TransactionExecutor propagation: NESTED', () => {
   });
 
   it('starts a fresh transaction when NESTED is requested with no active transaction', async () => {
+    const runner = fakeQueryRunner();
     const dataSourceManager = fakeDataSourceManager({
-      transaction: async (fn) => fn({} as EntityManager),
+      createQueryRunner: () => runner,
     });
     const executor = new TransactionExecutor(dataSourceManager);
 
@@ -388,5 +391,6 @@ describe('TransactionExecutor propagation: NESTED', () => {
     ).resolves.toBe('ok');
 
     expect(dataSourceManager.dataSource).toHaveBeenCalled();
+    expect(runner.commitTransaction).toHaveBeenCalledTimes(1);
   });
 });

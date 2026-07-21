@@ -104,4 +104,77 @@ describe('TransactionExecutor + transaction hooks (real DataSource)', () => {
 
     expect(commitFired).toBe(false);
   });
+
+  it('fires the commit hook strictly after the physical COMMIT succeeds, not merely after the callback returns', async () => {
+    const events: string[] = [];
+
+    const originalCreateQueryRunner =
+      dataSource.createQueryRunner.bind(dataSource);
+
+    jest
+      .spyOn(dataSource, 'createQueryRunner')
+      .mockImplementation(
+        (...args: Parameters<DataSource['createQueryRunner']>) => {
+          const runner = originalCreateQueryRunner(...args);
+          const originalCommit = runner.commitTransaction.bind(runner);
+
+          runner.commitTransaction = async (...commitArgs) => {
+            events.push('physical-commit');
+            return originalCommit(...commitArgs);
+          };
+
+          return runner;
+        },
+      );
+
+    const result = await executor.execute(() => {
+      events.push('callback');
+
+      runOnTransactionCommit(() => {
+        events.push('commit-hook');
+      });
+
+      return Promise.resolve('ok');
+    });
+
+    expect(result).toBe('ok');
+    expect(events).toEqual(['callback', 'physical-commit', 'commit-hook']);
+  });
+
+  it('fires the rollback hook strictly after the physical ROLLBACK, when the callback throws', async () => {
+    const events: string[] = [];
+
+    const originalCreateQueryRunner =
+      dataSource.createQueryRunner.bind(dataSource);
+
+    jest
+      .spyOn(dataSource, 'createQueryRunner')
+      .mockImplementation(
+        (...args: Parameters<DataSource['createQueryRunner']>) => {
+          const runner = originalCreateQueryRunner(...args);
+          const originalRollback = runner.rollbackTransaction.bind(runner);
+
+          runner.rollbackTransaction = async (...rollbackArgs) => {
+            events.push('physical-rollback');
+            return originalRollback(...rollbackArgs);
+          };
+
+          return runner;
+        },
+      );
+
+    await expect(
+      executor.execute(() => {
+        events.push('callback');
+
+        runOnTransactionRollback(() => {
+          events.push('rollback-hook');
+        });
+
+        throw new Error('boom');
+      }),
+    ).rejects.toThrow('boom');
+
+    expect(events).toEqual(['callback', 'physical-rollback', 'rollback-hook']);
+  });
 });
