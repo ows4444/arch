@@ -19,6 +19,7 @@ import {
   WORKFLOW_PARENT_FAILURE_HANDLER,
   WORKFLOW_RETRY_JITTER,
   WORKFLOW_RETRY_SCHEDULER,
+  WORKFLOW_TRANSACTION_RUNNER,
 } from '../../constants/workflow.tokens';
 import { WorkflowChildMetadata } from '../../definition/workflow-child-metadata';
 import { NonRetriableWorkflowError } from '../../errors';
@@ -29,6 +30,7 @@ import {
 import type { WorkflowParentFailureHandler } from '../../ports/workflow-parent-failure-handler';
 import type { WorkflowRetryJitter } from '../../models/workflow-retry-jitter';
 import type { WorkflowRetryScheduler } from '../../models/workflow-retry-scheduler';
+import type { WorkflowTransactionRunner } from '../../ports/workflow-transaction-runner';
 
 @Injectable()
 export class ChildWorkflowService {
@@ -50,6 +52,9 @@ export class ChildWorkflowService {
 
     @Inject(WORKFLOW_RETRY_SCHEDULER)
     private readonly retryScheduler: WorkflowRetryScheduler,
+
+    @Inject(WORKFLOW_TRANSACTION_RUNNER)
+    private readonly transactionRunner: WorkflowTransactionRunner,
   ) {}
 
   private async retryChild(
@@ -510,15 +515,30 @@ export class ChildWorkflowService {
       }
 
       case 'retry-child': {
-        await this.retryChild(definition, child);
+        // retryChild() can block for a real-time backoff delay
+        // (WorkflowRetryScheduler.wait, seconds to tens of seconds under
+        // exponential backoff) before resetting and resuming the child.
+        // onChildFailed runs synchronously from WorkflowFailureService
+        // .failExecution, nested inside the failing child's own still-open
+        // database transaction — awaiting that delay inline here would hold
+        // the transaction (and its connection/locks) open for the entire
+        // backoff window, and would recursively run the resumed child's next
+        // step nested inside that same uncommitted transaction. Deferring to
+        // afterCommit — the same pattern WorkflowFailureService already uses
+        // to schedule its own top-level retry/compensation — ensures the
+        // wait and the resumed execution both happen only after the
+        // failure's own transaction has actually committed.
+        this.transactionRunner.afterCommit?.(async () => {
+          await this.retryChild(definition, child);
 
-        // retryChild() either resumed the child (still in-flight, not
-        // resolved) or gave up once maxRetries was reached (now
-        // permanently 'failed') — checkJoinQuorum re-reads the child's
-        // current status itself, so it's correct either way.
-        if (child.joinId) {
-          await this.checkJoinQuorum(parent.workflowId);
-        }
+          // retryChild() either resumed the child (still in-flight, not
+          // resolved) or gave up once maxRetries was reached (now
+          // permanently 'failed') — checkJoinQuorum re-reads the child's
+          // current status itself, so it's correct either way.
+          if (child.joinId) {
+            await this.checkJoinQuorum(parent.workflowId);
+          }
+        });
 
         return;
       }

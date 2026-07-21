@@ -1811,3 +1811,190 @@ PASS
 ## Next Loop
 
 - None forced for this item — it's complete. Priorities are as stated in Loop 013's Next Loop.
+
+---
+
+# Loop 015
+
+**Library:** libs/workflow
+**Date:** 2026-07-21
+
+## Goal
+
+Fresh, adversarial Phase 1/2 review pass over `libs/workflow` per explicit user request, plus a
+required cross-check triggered by a sibling loop: `libs/database`'s `TransactionExecutor` had a
+just-fixed Critical bug where `runOnTransactionCommit`/`runOnTransactionRollback`/
+`runOnTransactionComplete` hooks fired based on when the user callback *settled* rather than when
+the physical COMMIT/ROLLBACK actually executed (plus a stray-second-`commit()` bug for
+`REQUIRES_NEW`). Task: determine whether `libs/workflow`'s `persistence: 'database'` adapter or its
+own `persistence: 'typeorm'` adapter relied on the old (buggy) hook-timing behavior, and do a
+genuinely fresh review of the engine rather than re-confirming prior loops' conclusions.
+
+## Files Reviewed
+
+- **libs/database cross-check:** `persistence/adapters/database/database-workflow-transaction-runner.ts`,
+  `persistence/adapters/typeorm/stores/typeorm-workflow-transaction-runner.ts`,
+  `ports/workflow-transaction-runner.ts`, and (read-only, to understand the contract being relied
+  on) `libs/database/src/transaction/transaction.executor.ts` and `transaction.context.ts`.
+- `engine/child-workflow/child-workflow.service.ts` in full (again — see Problems Found; this is
+  the fourth loop in a row to find something new in this file after a full read, following Loops
+  008/009/013).
+- `engine/lifecycle/failure.service.ts`, `engine/lifecycle/completion.service.ts`,
+  `engine/executor/executor.ts` — traced every call site of `WorkflowFailureService.failExecution`/
+  `.handleFailure` and `WorkflowCompletionService.completeIfFinished` to confirm whether
+  `ChildWorkflowService.onChildFailed`/`.onChildCompleted` run inside or outside the caller's
+  active database transaction.
+- `engine/retry/retry.service.ts` (the top-level, already-correct retry pattern: persists a
+  `retryAt` timestamp and returns immediately — no blocking wait — relying on
+  `WorkflowAutoRecoveryService`'s sweep to pick it up later) and
+  `engine/retry/default-scheduler.service.ts` (`DefaultWorkflowRetryScheduler.wait`: a real
+  `setTimeout`, confirming the delay in `ChildWorkflowService.retryChild` is a genuine real-time
+  wait, not a test-only abstraction).
+
+## Problems Found
+
+**Critical (libs/database cross-check — no `libs/workflow` code change needed)**
+- Not applicable — see "libs/database cross-check outcome" below for the full analysis. Both
+  `libs/workflow` transaction runners were already safe against the old bug; recorded here per the
+  task's explicit instruction to report the outcome even when no fix is required.
+
+**High**
+- `ChildWorkflowService.onChildFailed`'s `'retry-child'` case called `this.retryChild(definition,
+  child)` **synchronously**, and `retryChild()` — when the child hasn't exhausted its retries —
+  does `await this.retryScheduler.wait(this.retryJitter.apply(delay, attempt))` before resetting
+  and resuming the child. `DefaultWorkflowRetryScheduler.wait` is a real `setTimeout`
+  (`DEFAULT_CHILD_RETRY_DELAY_MS = 5000`, exponential backoff — so 5s/10s/20s/... in practice).
+  `onChildFailed` is called from `WorkflowFailureService.failExecution`, which is itself always
+  invoked from inside an already-open database transaction (every `WorkflowExecutor.execute`/
+  `.resume`/`.wake`/`.resumeJoin`/`.signal` wraps its whole body, including the failure-handling
+  catch block, in `transactionRunner.execute`/`.executeOrJoin`). Since `executeOrJoin`/`execute`
+  simply join an already-active transaction rather than starting a new one, the entire
+  `retryChild()` call — including the multi-second `setTimeout` wait, and the subsequent
+  `stateService.save()` + `executor.resume()` (which itself recursively runs the child's next step,
+  fully nested inside the still-open outer transaction) — executed while the failing child's own
+  database transaction was still open and uncommitted. Concretely, this meant: (1) a database
+  connection/transaction held open for the full backoff delay on every `'retry-child'` failure —
+  real connection-pool exhaustion and lock-contention risk under any nontrivial fan-out/retry load
+  (ci.loop §12); (2) the resumed child's next step running fully nested inside a different logical
+  operation's uncommitted transaction, rather than the failure's own record becoming durable before
+  further work began (ci.loop §7's atomicity-between-state-persistence rule). This diverges from
+  the codebase's own established, deliberate pattern: the top-level `WorkflowRetryService.retry()`
+  never blocks — it persists a `retryAt` timestamp and returns, relying on
+  `WorkflowAutoRecoveryService`'s sweep to pick it up later — and `WorkflowFailureService
+  .failExecution` itself already defers its own retry/compensation scheduling into an
+  `afterCommit` callback for exactly this reason. Loop 008's own notes asserted `onChildFailed`
+  runs "after the child's own state-transition transaction has already committed" — that assumption
+  was never actually true for the synchronous call path and had gone unverified across five loops
+  (008–013) that built and hardened join-quorum logic on top of it.
+
+## Changes Made
+
+- `ChildWorkflowService` now injects `WORKFLOW_TRANSACTION_RUNNER` (`WorkflowTransactionRunner`).
+- `onChildFailed`'s `'retry-child'` case now defers the entire `retryChild()` call plus its
+  follow-up `checkJoinQuorum()` re-check into `this.transactionRunner.afterCommit?.(async () =>
+  {...})`, mirroring the exact pattern `WorkflowFailureService.failExecution` already uses for its
+  own retry/compensation scheduling. This guarantees the backoff wait and the resumed child's
+  execution both run only after the failing child's own transaction has actually committed — no
+  more holding a connection/transaction open across a real-time timer, and no more nesting a full
+  step execution inside an unrelated, still-open transaction.
+- The `'ignore'` and `'fail-parent'`/`'compensate-parent'` cases were left unchanged — they don't
+  block on a real-time wait, so this specific defect doesn't apply to them (the broader question of
+  whether *all* cross-aggregate `onChildCompleted`/`onChildFailed` work should be deferred to
+  `afterCommit` is intentionally left open — see Remaining TODO).
+
+## Why
+
+- Scoped the fix narrowly to the one call path with a genuine, severe defect (a real-time blocking
+  wait held open inside someone else's database transaction) rather than restructuring
+  `onChildCompleted`/`onChildFailed` wholesale, per Section 17's "minimize diff" and Section 18's
+  requirement that HIGH-risk changes (this touches retry/failure semantics — workflow semantics is
+  an explicit HIGH category) be justified narrowly, not opportunistically expanded.
+- Verified via `TypeOrmWorkflowTransactionRunner.execute()` that its internal `AsyncLocalStorage`
+  transaction-context scope closes (`isActive()` becomes `false`) before its `afterCommit`
+  callbacks run — so deferring via `afterCommit` genuinely gives the deferred work its own fresh
+  transaction rather than silently rejoining the just-closed one. For the `database` backend,
+  `DatabaseWorkflowTransactionRunner.afterCommit` delegates to `libs/database`'s
+  `runOnTransactionCommit`, which (per the sibling loop's fix) now fires strictly after the
+  physical COMMIT — a strict improvement over the pre-fix synchronous-inline behavior regardless of
+  backend.
+- Did not attempt to also guard `checkJoinQuorum`'s non-`resumeJoin()` steps (`stateService.load`,
+  `registry.get`, `findByParentWorkflowId`) with a try/catch inside the new `afterCommit` closure —
+  they were already unguarded in the pre-existing code at the same call site, and moving *when*
+  they run (post-commit instead of pre-commit) doesn't change whether they can throw; not a
+  regression introduced by this loop, and adding new defensive error handling there wasn't part of
+  the identified defect.
+
+## libs/database cross-check outcome
+
+- **`persistence: 'database'` adapter (`WorkflowDatabasePersistenceModule` /
+  `DatabaseWorkflowTransactionRunner`): not affected by the old bug, and does not rely on the fixed
+  hook-timing behavior in any fragile way.** `DatabaseWorkflowTransactionRunner.execute()`/
+  `.executeOrJoin()` both call `TransactionExecutor.execute(operation)` with **no `options`
+  argument** — meaning every call goes through `TransactionExecutor`'s default path
+  (`runOwnedTransaction`, the fixed "commit hooks fire after the physical COMMIT, inside the same
+  ALS scope" path) or, if a transaction is already active, simply joins it. `libs/workflow` never
+  passes `{ propagation: TransactionPropagation.REQUIRES_NEW }` (the specific propagation mode that
+  had the stray-second-`commit()` bug) anywhere — it has no concept of nested/independent
+  sub-transactions of its own; nesting is handled entirely by `WorkflowTransactionRunner
+  .execute`/`.executeOrJoin` simply joining an already-active transaction. So neither of the two
+  bugs fixed in the sibling loop had a reachable path through `libs/workflow`'s database-backed
+  adapter. `WorkflowStateService`, `WorkflowStepPersistenceService`, `WorkflowFailureService`, etc.
+  all call `afterCommit` (→ `runOnTransactionCommit`) expecting it to fire only once the state
+  write is durable — that expectation was violated before the sibling fix and is honored now,
+  transitively, with zero code change required on the workflow side.
+- **`persistence: 'typeorm'` adapter (`WorkflowPersistenceModule` /
+  `TypeOrmWorkflowTransactionRunner`): entirely independent of `libs/database`, and was already
+  correct.** This adapter runs its own transactions directly via TypeORM's `DataSource.transaction()`
+  helper (not `libs/database`'s `TransactionExecutor` at all) and maintains its own separate
+  `AsyncLocalStorage`-backed callback queue for `afterCommit`. `dataSource.transaction()` only
+  resolves after TypeORM has physically committed, and the callback queue is drained strictly after
+  that `await` — so commit-hook firing was already correctly ordered against the physical commit,
+  independent of whatever bug existed in `libs/database`'s own `TransactionExecutor`. No overlap,
+  no shared code path, no fix needed.
+- Net conclusion: both of `libs/workflow`'s persistence backends were already safe. The High-severity
+  bug found and fixed this loop (`ChildWorkflowService.retryChild`'s inline blocking wait) is
+  unrelated to the `libs/database` bug — it would have held a transaction open regardless of
+  whether the underlying commit-hook timing was correct, since the problem was that the wait ran
+  *before* any commit was ever attempted, synchronously inside the still-open transaction.
+
+## Tests
+
+`libs/workflow` suite is now 48 spec files / 454 tests (up from 47/447 — one new test in
+`child-workflow.service.spec.ts` asserting the retry-child policy defers to `afterCommit` and does
+not touch `stateService`/`executor` synchronously; six existing retry-child tests updated to flush
+the captured `afterCommit` callback before asserting on its effects). Full monorepo suite: 133
+suites / 1049 tests, all passing.
+
+## Build
+
+PASS (`npm run typecheck` — `tsc --noEmit`)
+
+## Lint
+
+PASS (`npm run lint`)
+
+## Remaining TODO
+
+- `ChildWorkflowService.onChildCompleted`'s call into `checkJoinQuorum()` → `executor.resumeJoin()`
+  is still called synchronously, nested inside the completing child's own open transaction (same
+  general shape as the bug fixed this loop, minus the real-time timer wait — it "only" nests a full
+  step execution inside an unrelated transaction rather than also holding a connection open across
+  a `setTimeout`). Not fixed this loop: it has no blocking real-time wait, so its severity is lower,
+  and Loop 013 already documented the closely-related, broader "no recovery for a
+  committed-but-never-materialized `afterCommit` side effect" gap as a candidate for a future Design
+  Mode session rather than a quick patch — deferring `onChildCompleted` too belongs in that same
+  deliberate design pass, not bundled reactively into this loop's narrower fix.
+- Unchanged from Loop 013/014: the `afterCommit` side-effect durability gap, the `ChildWorkflowService`
+  SRP split (now more relevant than ever — this is the fifth loop in a row to touch this file), and
+  the standalone `npm run build` `rootDir` pre-existing failure (not urgent while consumed in-repo).
+
+## Next Loop
+
+- Strongest candidate: revisit whether `onChildCompleted`/`onChildFailed`'s remaining synchronous,
+  transaction-nested calls (now just the `'ignore'`/`'fail-parent'`/`'compensate-parent'` cases and
+  `onChildCompleted` itself) should uniformly move to `afterCommit`, as part of the same Design Mode
+  session Loop 013 flagged for the broader `afterCommit`-durability question — doing it piecemeal
+  loop-by-loop each time a concrete defect is found (as this loop did) risks leaving an inconsistent
+  half-migrated state.
+- `ChildWorkflowService`'s SRP split (join-quorum/summarization → its own service) remains a
+  lower-priority, purely organizational follow-up.

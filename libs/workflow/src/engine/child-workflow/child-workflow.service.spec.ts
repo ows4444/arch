@@ -33,6 +33,23 @@ function setup(maxRetries = 3) {
   const retryJitter = { apply: jest.fn().mockReturnValue(0) };
   const retryScheduler = { wait: jest.fn().mockResolvedValue(undefined) };
 
+  const afterCommitCallbacks: Array<() => Promise<void>> = [];
+  const transactionRunner = {
+    afterCommit: jest.fn((callback: () => Promise<void>) => {
+      afterCommitCallbacks.push(callback);
+    }),
+  };
+  const flushAfterCommit = async (): Promise<void> => {
+    const callbacks = afterCommitCallbacks.splice(
+      0,
+      afterCommitCallbacks.length,
+    );
+
+    for (const callback of callbacks) {
+      await callback();
+    }
+  };
+
   const childDefinition = {
     workflow: ChildWorkflowClass,
     failurePolicy: 'retry-child' as const,
@@ -73,6 +90,7 @@ function setup(maxRetries = 3) {
     parentFailureHandler,
     retryJitter,
     retryScheduler,
+    transactionRunner as never,
   );
 
   return {
@@ -86,6 +104,8 @@ function setup(maxRetries = 3) {
     retryScheduler,
     compensation,
     registeredParent,
+    transactionRunner,
+    flushAfterCommit,
   };
 }
 
@@ -116,8 +136,14 @@ describe('ChildWorkflowService', () => {
     workflowName: 'parent-workflow',
   });
 
-  it('retries the child and resumes execution when under maxRetries', async () => {
-    const { service, executor, stateService } = setup();
+  it('defers the retry-child policy to run after the failing transaction commits', async () => {
+    // WorkflowFailureService.failExecution calls onChildFailed synchronously,
+    // nested inside the failing child's own still-open transaction. A
+    // 'retry-child' policy must not run inline there — it can block for a
+    // real-time backoff delay, which would hold that transaction (and its
+    // connection/locks) open for the wait's duration. See child-workflow
+    // .service.ts's afterCommit comment on this case.
+    const { service, executor, stateService, transactionRunner } = setup();
     const child = createWorkflowExecutionState({
       workflowId: 'child-1',
       workflowName: 'child-workflow',
@@ -129,6 +155,26 @@ describe('ChildWorkflowService', () => {
     stateService.save.mockResolvedValue(child);
 
     await service.onChildFailed(parent, child);
+
+    expect(transactionRunner.afterCommit).toHaveBeenCalledTimes(1);
+    expect(stateService.save).not.toHaveBeenCalled();
+    expect(executor.resume).not.toHaveBeenCalled();
+  });
+
+  it('retries the child and resumes execution when under maxRetries', async () => {
+    const { service, executor, stateService, flushAfterCommit } = setup();
+    const child = createWorkflowExecutionState({
+      workflowId: 'child-1',
+      workflowName: 'child-workflow',
+      status: 'failed',
+      failureCount: 1,
+      lastFailure: { code: 'ERR', message: 'boom', retriable: true },
+    });
+
+    stateService.save.mockResolvedValue(child);
+
+    await service.onChildFailed(parent, child);
+    await flushAfterCommit();
 
     expect(stateService.save).toHaveBeenCalledTimes(1);
     expect(executor.resume).toHaveBeenCalledWith('child-1');
@@ -142,6 +188,7 @@ describe('ChildWorkflowService', () => {
       retryDelay,
       retryJitter,
       retryScheduler,
+      flushAfterCommit,
     } = setup();
     const child = createWorkflowExecutionState({
       workflowId: 'child-1',
@@ -156,6 +203,7 @@ describe('ChildWorkflowService', () => {
     stateService.save.mockResolvedValue(child);
 
     await service.onChildFailed(parent, child);
+    await flushAfterCommit();
 
     expect(retryDelay.compute).toHaveBeenCalledWith(
       expect.objectContaining({ strategy: 'exponential' }),
@@ -170,7 +218,7 @@ describe('ChildWorkflowService', () => {
   });
 
   it('treats a concurrent save conflict during retry as recoverable rather than an unexpected failure', async () => {
-    const { service, stateService, executor } = setup();
+    const { service, stateService, executor, flushAfterCommit } = setup();
     const child = createWorkflowExecutionState({
       workflowId: 'child-1',
       workflowName: 'child-workflow',
@@ -183,12 +231,14 @@ describe('ChildWorkflowService', () => {
       new WorkflowConcurrencyError('stale state version'),
     );
 
-    await expect(service.onChildFailed(parent, child)).resolves.toBeUndefined();
+    await service.onChildFailed(parent, child);
+
+    await expect(flushAfterCommit()).resolves.toBeUndefined();
     expect(executor.resume).not.toHaveBeenCalled();
   });
 
   it('does not retry once maxRetries has been reached', async () => {
-    const { service, stateService, executor } = setup(3);
+    const { service, stateService, executor, flushAfterCommit } = setup(3);
     const child = createWorkflowExecutionState({
       workflowId: 'child-1',
       workflowName: 'child-workflow',
@@ -198,13 +248,14 @@ describe('ChildWorkflowService', () => {
     });
 
     await service.onChildFailed(parent, child);
+    await flushAfterCommit();
 
     expect(stateService.save).not.toHaveBeenCalled();
     expect(executor.resume).not.toHaveBeenCalled();
   });
 
   it('skips retry when the last failure is marked non-retriable', async () => {
-    const { service, stateService } = setup();
+    const { service, stateService, flushAfterCommit } = setup();
     const child = createWorkflowExecutionState({
       workflowId: 'child-1',
       workflowName: 'child-workflow',
@@ -214,6 +265,7 @@ describe('ChildWorkflowService', () => {
     });
 
     await service.onChildFailed(parent, child);
+    await flushAfterCommit();
 
     expect(stateService.save).not.toHaveBeenCalled();
   });
@@ -825,7 +877,7 @@ describe('ChildWorkflowService', () => {
     });
 
     it("checks join quorum once a 'retry-child' sibling exhausts its retries", async () => {
-      const { service, stateService, executor } = setup(1);
+      const { service, stateService, executor, flushAfterCommit } = setup(1);
       const exhaustedChild = createWorkflowExecutionState({
         workflowId: 'child-1',
         workflowName: 'child-workflow',
@@ -838,12 +890,13 @@ describe('ChildWorkflowService', () => {
       stateService.findByParentWorkflowId.mockResolvedValue([exhaustedChild]);
 
       await service.onChildFailed(joinWaitingParent, exhaustedChild);
+      await flushAfterCommit();
 
       expect(executor.resumeJoin).toHaveBeenCalledWith('parent-1');
     });
 
     it("does not check join quorum while a 'retry-child' sibling is still being retried", async () => {
-      const { service, stateService, executor } = setup(3);
+      const { service, stateService, executor, flushAfterCommit } = setup(3);
       const retryingChild = createWorkflowExecutionState({
         workflowId: 'child-1',
         workflowName: 'child-workflow',
@@ -857,6 +910,7 @@ describe('ChildWorkflowService', () => {
       stateService.findByParentWorkflowId.mockResolvedValue([retryingChild]);
 
       await service.onChildFailed(joinWaitingParent, retryingChild);
+      await flushAfterCommit();
 
       expect(executor.resumeJoin).not.toHaveBeenCalled();
     });
