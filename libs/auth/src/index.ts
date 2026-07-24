@@ -18,6 +18,7 @@ export * from './application/token.service';
 export * from './application/refresh-token.service';
 export * from './application/password-reset.service';
 export * from './application/email-verification.service';
+export * from './application/mfa.service';
 
 /*
  * Ports
@@ -25,6 +26,7 @@ export * from './application/email-verification.service';
 export type { PasswordHasher } from './ports/password-hasher.interface';
 export type { AccessTokenDenylist } from './ports/access-token-denylist.interface';
 export type { AuthEventPublisher } from './ports/auth-event-publisher.interface';
+export type { MfaSecretCipher } from './ports/mfa-secret-cipher.interface';
 export * from './ports/auth.events';
 
 /*
@@ -34,6 +36,7 @@ export * from './adapters/argon2-password-hasher';
 export * from './adapters/noop-access-token-denylist';
 export * from './adapters/cache-access-token-denylist';
 export * from './adapters/noop-auth-event-publisher';
+export * from './adapters/aes-gcm-mfa-secret-cipher';
 
 /*
  * HTTP
@@ -71,6 +74,12 @@ export * from './dto/confirm-password-reset.dto';
 export * from './dto/request-email-verification.dto';
 export * from './dto/confirm-email-verification.dto';
 export * from './dto/change-password.dto';
+export * from './dto/mfa-enroll-response.dto';
+export * from './dto/confirm-mfa-enrollment.dto';
+export * from './dto/mfa-recovery-codes-response.dto';
+export * from './dto/disable-mfa.dto';
+export * from './dto/mfa-challenge-response.dto';
+export * from './dto/verify-mfa.dto';
 
 /*
  * Domain
@@ -81,12 +90,14 @@ export * from './domain/permission.entity';
 export * from './domain/refresh-token.entity';
 export * from './domain/auth-token.entity';
 export * from './domain/auth-token-purpose.enum';
+export * from './domain/mfa-secret.entity';
 export * from './domain/user-status.enum';
 export * from './domain/user.repository';
 export * from './domain/role.repository';
 export * from './domain/permission.repository';
 export * from './domain/refresh-token.repository';
 export * from './domain/auth-token.repository';
+export * from './domain/mfa-secret.repository';
 
 /*
  * Errors
@@ -106,6 +117,12 @@ export * from './errors/password-reset-token-invalid.error';
 export * from './errors/email-verification-token-invalid.error';
 export * from './errors/email-not-verified.error';
 export * from './errors/session-not-found.error';
+export * from './errors/mfa-configuration.error';
+export * from './errors/mfa-challenge-invalid.error';
+export * from './errors/mfa-code-invalid.error';
+export * from './errors/mfa-enrollment-not-pending.error';
+export * from './errors/mfa-already-enabled.error';
+export * from './errors/mfa-not-enabled.error';
 
 /*
  * Config

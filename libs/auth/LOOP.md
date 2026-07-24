@@ -2199,6 +2199,121 @@ deletes, so the table grows without bound — no cleanup path existed anywhere.
 - `.env`/`.env.example`: `MYSQL_TIME_ZONE` changed from `UTC` to `Z` (the mysql2-recognized keyword)
   — a real, independent fix (prevents mysql2's documented future breaking change: "in future
   versions... an error will be thrown"), but confirmed *not* the source of the 5-hour drift above.
+
+---
+
+# Loop 025
+
+**Library:** libs/auth
+**Date:** 2026-07-24
+
+## Goal
+
+Implement TOTP-based MFA/2FA per `libs/auth/ARCH.md` Design 009's handoff — the first of
+`REQUIREMENTS.md` Tier 1's three remaining "Auth completeness" gaps (MFA/2FA, API keys,
+OAuth2/SSO), chosen with the user over the other two.
+
+## Files Reviewed
+
+- `application/auth.service.ts`, `http/auth.controller.ts` — confirmed `login` was a single-step
+  password-check-to-JWT call with no intermediate state anywhere to hook a second factor into.
+- `domain/auth-token.entity.ts`/`auth-token.repository.ts`, `application/password-reset.service.ts`
+  — the existing single-use hashed-token pattern, reused for the MFA challenge and recovery codes.
+- `auth.module.ts`, `auth.constants.ts`, `auth.types.ts` — the `forRoot`/`forRootAsync` provider
+  pattern (fallback + `AUTH_MODULE_OPTIONS` override) every other port in this library already
+  follows.
+- `apps/server/src/app.module.ts` — `RateLimitModule.forRoot`'s limiter config, `AuthModuleOptions`
+  factory, `AuthEnvironmentSchema` validation.
+
+## Problems Found
+
+**Critical (found during live verification, not code review)**
+- `MfaSecretRepository.upsertPending`'s original implementation used `BaseRepository.upsert()`,
+  which builds a raw `INSERT ... ON DUPLICATE KEY UPDATE` that bypasses TypeORM's
+  `@CreateDateColumn`/`@UpdateDateColumn` value generation — it emitted literal SQL `DEFAULT` for
+  `createdAt`/`updatedAt`, which MySQL rejects on a column with no DB-level default
+  (`ER_NO_DEFAULT_FOR_FIELD`). Compounded by the new migration itself not declaring
+  `default: 'CURRENT_TIMESTAMP'` for those columns (unlike `InitialAuthSchema`'s `auth_users`
+  table, which does). Neither `typecheck`/`lint`/`test`/`build` catches this — TypeORM's `upsert()`
+  typing doesn't distinguish "columns with a DB default" from "columns TypeORM populates in JS,"
+  and no auth migration had exercised this combination before. Caught live: `POST /auth/mfa/enroll`
+  500'd against real MySQL. Fixed both ends — `upsertPending` switched to find-then-`save()` (no
+  other repository in this codebase uses `upsert()`, so this restores consistency rather than
+  breaking it), and the migration gained the same `default`/`onUpdate` clauses `InitialAuthSchema`
+  uses. Re-verified with a full drop-table-and-let-the-migration-run cycle, not just a manual
+  `ALTER TABLE` patch.
+
+## Changes Made
+
+- **Domain:** `MfaSecretEntity` (`auth_mfa_secrets`, one row per user), `MfaSecretRepository`
+  (`findByUserId`/`upsertPending`/`markEnabled`/`deleteForUser`), `AuthTokenPurpose.MFA_CHALLENGE`/
+  `MFA_RECOVERY_CODE`.
+- **Ports/adapters:** `MfaSecretCipher` interface, `AesGcmMfaSecretCipher` default implementation
+  (AES-256-GCM, SHA-256-derived key, lazy-fails via `MfaConfigurationError`).
+- **Application:** `MfaService` (`beginEnrollment`/`confirmEnrollment`/`disable`/`isEnabled`/
+  `issueChallenge`/`verifyChallenge`), each mutation auditing via the existing `AuditService`
+  dependency (`mfa.enabled`/`mfa.disabled`). `AuthService.login` now returns
+  `AuthSession | MfaChallenge`, issuing a challenge instead of a session when MFA is enabled; new
+  `AuthService.completeMfaLogin`/`disableMfa`/`beginMfaEnrollment`/`confirmMfaEnrollment`.
+- **HTTP:** four new `AuthController` routes — `POST /auth/mfa/enroll`,
+  `POST /auth/mfa/enroll/confirm`, `POST /auth/mfa/disable` (all `JwtAuthGuard`-protected),
+  `POST /auth/mfa/verify` (public, `@RateLimit('mfa-verify')`); `login`'s response type widens to
+  `AuthSessionResponseDto | MfaChallengeResponseDto`.
+- **Errors:** `MfaConfigurationError`, `MfaChallengeInvalidError`, `MfaCodeInvalidError`,
+  `MfaEnrollmentNotPendingError`, `MfaAlreadyEnabledError`, `MfaNotEnabledError`.
+- **Persistence:** `MfaSecrets1753400000000` migration (`auth_mfa_secrets` table).
+- **Config:** `AuthEnvironmentSchema.AUTH_MFA_ENCRYPTION_KEY` (optional, ≥32 chars);
+  `AuthModuleOptions.mfa.{encryptionKey,challengeTtlSeconds,recoveryCodesCount}`.
+- **apps/server:** `AUTH_MFA_ENCRYPTION_KEY` wired into `AuthModuleOptions.mfa`; new `mfa-verify`
+  rate limiter (`5/15min` per IP, matching password-reset/email-verification); `.env`/`.env.example`
+  gained the new var.
+- **Dependency:** `otplib@^12` added (see Design 009 Key Decisions HIGH #3 for the v12-over-v13
+  reasoning).
+
+## Why
+
+- See `libs/auth/ARCH.md` Design 009 for the full design rationale (two-step login, encryption vs.
+  hashing, recovery-code reuse of `AuthTokenEntity`, challenge-not-consumed-on-failure).
+
+## Tests
+
+- Unit: `aes-gcm-mfa-secret-cipher.spec.ts` (round-trip, random IV, authenticity-check failure,
+  lazy-fail with no key), `mfa.service.spec.ts` (12 cases across enroll/confirm/disable/challenge/
+  verify, including the recovery-code fallback path), `auth.service.spec.ts` (new MFA-branch/
+  `completeMfaLogin`/`disableMfa` cases; existing cases updated for the new constructor param).
+- Integration (`auth.integration.spec.ts`, real sqlite): four new tests under a `describe('MFA')`
+  block — full enroll → two-step login → verify flow, incorrect-code-doesn't-consume-the-challenge,
+  recovery-code-works-once-then-rejected, disable-requires-password-and-restores-single-step-login.
+  Every pre-existing `authService.login(...)` call site updated to narrow the new union type via a
+  `loginSession` helper. `auth-concurrency.mysql.integration.spec.ts`'s `AuthService` construction
+  updated for the new constructor param (this suite doesn't exercise MFA itself).
+- **Live-verified end to end against real MySQL/Redis/RabbitMQ** (not just typecheck/lint/test):
+  register → activate → login → enroll → confirm (recovery codes issued) → login now returns a
+  challenge → verify with correct TOTP code succeeds → verify with wrong code returns 401 without
+  consuming the challenge → verify with a recovery code succeeds once, a second use of the same
+  code is rejected → disable with wrong password rejected (401), correct password succeeds (204) →
+  `auth_mfa_secrets` row confirmed deleted, `audit_entries` confirmed both `mfa.enabled`/
+  `mfa.disabled` rows. This live pass is what surfaced the Critical finding above — the full
+  monorepo test suite (sqlite-backed) never touches a real MySQL `DEFAULT` clause.
+
+## Build
+
+PASS
+
+## Lint
+
+PASS
+
+## Remaining TODO
+
+- API keys, OAuth2/SSO — the two remaining Tier 1 "Auth completeness" items (see Design 009 Open
+  Questions).
+
+## Next Loop
+
+- No further work queued on MFA itself until a concrete trigger appears (a second MFA method, an
+  admin-recovery need). Next `libs/auth` work is most likely API keys or OAuth2/SSO, per
+  `REQUIREMENTS.md` Tier 1 — no concrete trigger yet for either.
 - `.env`/`.env.example`: added `TZ=UTC` — this is what actually fixes the drift, since it pins the
   Node process's own local timezone (this sandbox resolved to `Asia/Karachi`, confirmed via
   `Intl.DateTimeFormat().resolvedOptions().timeZone`) to UTC, which fixes every timezone-naive

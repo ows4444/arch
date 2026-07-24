@@ -27,9 +27,15 @@ import { ConfirmPasswordResetDto } from '../dto/confirm-password-reset.dto';
 import { RequestEmailVerificationDto } from '../dto/request-email-verification.dto';
 import { ConfirmEmailVerificationDto } from '../dto/confirm-email-verification.dto';
 import { ChangePasswordDto } from '../dto/change-password.dto';
+import { ConfirmMfaEnrollmentDto } from '../dto/confirm-mfa-enrollment.dto';
+import { DisableMfaDto } from '../dto/disable-mfa.dto';
+import { VerifyMfaDto } from '../dto/verify-mfa.dto';
 import { RateLimit } from '@/ratelimit';
 import { RegisterResponseDto } from '../dto/register-response.dto';
 import { AuthSessionResponseDto } from '../dto/auth-session-response.dto';
+import { MfaChallengeResponseDto } from '../dto/mfa-challenge-response.dto';
+import { MfaEnrollResponseDto } from '../dto/mfa-enroll-response.dto';
+import { MfaRecoveryCodesResponseDto } from '../dto/mfa-recovery-codes-response.dto';
 import { ActiveSessionResponseDto } from '../dto/active-session-response.dto';
 import { AuthenticatedUserResponseDto } from '../dto/authenticated-user-response.dto';
 import { Public } from '../decorators/public.decorator';
@@ -69,16 +75,51 @@ export class AuthController {
   @RateLimit('login')
   @HttpCode(200)
   @Post('login')
-  @ApiOperation({ summary: 'Log in and receive an access + refresh token' })
+  @ApiOperation({
+    summary: 'Log in and receive an access + refresh token',
+    description:
+      'If the account has MFA enabled, returns an MfaChallengeResponseDto instead — exchange it via POST /auth/mfa/verify.',
+  })
   @ApiResponse({ status: 200, type: AuthSessionResponseDto })
+  @ApiResponse({
+    status: 200,
+    type: MfaChallengeResponseDto,
+    description: 'Returned instead when the account has MFA enabled',
+  })
   @ApiResponse({ status: 401, description: 'Invalid credentials' })
   @ApiResponse({ status: 429, description: 'Too many login attempts' })
   login(
     @Body() dto: LoginDto,
     @Ip() ip: string,
     @Headers('user-agent') userAgent?: string,
-  ): Promise<AuthSessionResponseDto> {
+  ): Promise<AuthSessionResponseDto | MfaChallengeResponseDto> {
     return this.auth.login(dto, this.metadata(ip, userAgent, dto.deviceId));
+  }
+
+  @Public()
+  @RateLimit('mfa-verify')
+  @HttpCode(200)
+  @Post('mfa/verify')
+  @ApiOperation({
+    summary:
+      'Complete a two-step MFA login, receiving an access + refresh token',
+  })
+  @ApiResponse({ status: 200, type: AuthSessionResponseDto })
+  @ApiResponse({
+    status: 401,
+    description: 'Challenge invalid/expired/already used, or code incorrect',
+  })
+  @ApiResponse({ status: 429, description: 'Too many verification attempts' })
+  verifyMfa(
+    @Body() dto: VerifyMfaDto,
+    @Ip() ip: string,
+    @Headers('user-agent') userAgent?: string,
+  ): Promise<AuthSessionResponseDto> {
+    return this.auth.completeMfaLogin(
+      dto.challengeToken,
+      dto.code,
+      this.metadata(ip, userAgent, dto.deviceId),
+    );
   }
 
   @Public()
@@ -250,6 +291,60 @@ export class AuthController {
       dto.currentPassword,
       dto.newPassword,
     );
+  }
+
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @Post('mfa/enroll')
+  @ApiOperation({
+    summary: 'Begin MFA enrollment, returning a TOTP secret + QR-code URI',
+    description:
+      'Re-calling this before confirming restarts enrollment with a fresh secret. Enrollment only takes effect after POST /auth/mfa/enroll/confirm.',
+  })
+  @ApiResponse({ status: 201, type: MfaEnrollResponseDto })
+  @ApiResponse({ status: 400, description: 'MFA is already enabled' })
+  async beginMfaEnrollment(
+    @CurrentUser() user: AuthenticatedUser,
+  ): Promise<MfaEnrollResponseDto> {
+    return this.auth.beginMfaEnrollment(user.userId, user.email);
+  }
+
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @Post('mfa/enroll/confirm')
+  @ApiOperation({
+    summary: 'Confirm MFA enrollment, enabling it and issuing recovery codes',
+  })
+  @ApiResponse({ status: 201, type: MfaRecoveryCodesResponseDto })
+  @ApiResponse({
+    status: 400,
+    description: 'No pending enrollment for this account',
+  })
+  @ApiResponse({ status: 401, description: 'Incorrect code' })
+  async confirmMfaEnrollment(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: ConfirmMfaEnrollmentDto,
+  ): Promise<MfaRecoveryCodesResponseDto> {
+    const recoveryCodes = await this.auth.confirmMfaEnrollment(
+      user.userId,
+      dto.code,
+    );
+
+    return { recoveryCodes };
+  }
+
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(204)
+  @Post('mfa/disable')
+  @ApiOperation({ summary: 'Disable MFA for the current account' })
+  @ApiResponse({ status: 204, description: 'MFA disabled' })
+  @ApiResponse({ status: 401, description: 'Current password is incorrect' })
+  async disableMfa(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: DisableMfaDto,
+  ): Promise<void> {
+    await this.auth.disableMfa(user.userId, dto.password);
   }
 
   @ApiBearerAuth()

@@ -899,3 +899,141 @@ to drive a notification/email consumer — today nothing consumes these events")
 
 - **Public API surface / Module boundaries:** unchanged — the new publisher lives in `apps/server`,
   not in `libs/auth`.
+
+---
+
+# Design 009
+
+**Library / Bounded Context:** libs/auth
+**Date:** 2026-07-24
+
+## Goal
+
+Close the first of the three remaining "Auth completeness" gaps `REQUIREMENTS.md` Tier 1 names
+(MFA/2FA, API keys, OAuth2/SSO) — TOTP-based MFA/2FA, chosen with the user over the other two as
+the highest security value for an account/session model that already exists, with no external
+IdP/infra dependency. Scoped via three clarifying questions confirmed with the user before
+designing: (1) a two-step login flow (password → challenge → verify), (2) `otplib` for TOTP, (3)
+single-use recovery codes issued at enrollment confirmation.
+
+## Scale/Team Context Assumed
+
+Unchanged from Design 001 — single team, single monorepo, `apps/server` horizontally scaled behind
+shared MySQL/Redis. This is an internal capability of the existing Authentication bounded context,
+not a new one.
+
+## Bounded Contexts Identified
+
+- No new bounded context — MFA is internal to the existing Authentication context (`libs/auth`),
+  the same way password-reset/email-verification (Design 003-ish work, pre-dates this log) and
+  device management (Loop 022) were additive capabilities on the same aggregate rather than new
+  contexts of their own.
+
+## Key Decisions (with risk tag)
+
+**HIGH**
+1. **`AuthService.login`'s return type widens from `AuthSession` to `AuthSession | MfaChallenge`.**
+   An MFA-enabled account's login no longer issues a JWT/refresh token in one call — it returns a
+   short-lived (`DEFAULT_MFA_CHALLENGE_TTL_SECONDS`, 5 min) opaque `challengeToken`, exchanged via
+   the new `POST /auth/mfa/verify` for the real session. This is the only way to add a second
+   factor without either (a) issuing a session before the second factor is checked (defeats the
+   point) or (b) making every caller of `login` pass a TOTP code up front (breaks non-MFA accounts).
+   Risk: every caller of `AuthService.login`/`AuthController.login` must now narrow the union
+   (`mfaRequired` discriminant) — mitigated by keeping the discriminant optional-`false` on
+   `AuthSession` so existing non-MFA call sites narrow with a single `if (result.mfaRequired)`
+   check, and by every integration/unit test call site being updated in this same pass (see
+   `libs/auth/LOOP.md` Loop 025).
+2. **TOTP secrets are encrypted at rest (AES-256-GCM), not hashed.** Unlike password-reset/
+   email-verification tokens (`AuthTokenEntity`, one-way hash — the raw value is never needed
+   again), verifying a TOTP code requires the raw secret back, so hashing isn't an option. New
+   `MfaSecretCipher` port + `AesGcmMfaSecretCipher` default adapter, keyed by SHA-256 of
+   `AuthModuleOptions.mfa.encryptionKey` (`AUTH_MFA_ENCRYPTION_KEY`). Fails **lazily**, not at
+   `AuthModule` boot — `AesGcmMfaSecretCipher` throws `MfaConfigurationError` only when
+   `encrypt`/`decrypt` is actually invoked, so existing deployments that never set the env var keep
+   booting exactly as before (MFA is simply unusable, not a boot-time break). Mirrors `libs/auth`'s
+   own `PasswordHasher` port shape and `libs/ratelimit`'s fail-fast-at-first-use precedent (unknown
+   limiter name), not a new pattern.
+3. **`otplib` is a new dependency.** No existing TOTP/HOTP implementation anywhere in the monorepo.
+   Pinned to v12 (the classic `authenticator` singleton API) rather than v13 (a functional/
+   plugin-based rewrite requiring separate crypto-plugin wiring) — v12 is simpler, stable, and
+   sufficient for this scope; revisit only if a concrete v13-only capability becomes needed.
+
+**MEDIUM**
+- **Recovery codes reuse `AuthTokenEntity`/`AuthTokenPurpose`** (new `MFA_CHALLENGE`/
+  `MFA_RECOVERY_CODE` purposes) rather than a new entity — structurally identical to
+  password-reset/email-verification tokens (single-use, hashed, user-scoped), just with an
+  effectively-non-expiring `expiresAt` (a far-future sentinel date) since a recovery code's
+  lifetime is "until used or MFA disabled/re-enrolled," not TTL-bound. 10 codes issued at
+  `confirmEnrollment`, shown exactly once.
+- **The MFA challenge token is consumed only on a *successful* code check**, not on every attempt
+  — unlike password-reset/email-verification (where the token itself *is* the whole credential), a
+  wrong TOTP code shouldn't burn the one chance to retry a typo. Abuse is bounded by the
+  challenge's own short TTL and `@RateLimit('mfa-verify')` (5/15min per IP, same shape as
+  password-reset/email-verification), not single-shot consumption.
+- **Disabling MFA requires re-verifying the current password** (not a TOTP code) — same "prove
+  you're still you" gate `AuthService.changePassword` already applies, and specifically avoids
+  locking out a user who lost their authenticator device and is relying on disable-then-re-enroll.
+- **A new `mfa-verify` rate limiter** in `apps/server`'s `RateLimitModule.forRoot`, matching
+  password-reset/email-verification's `5/15min` shape exactly — see
+  `libs/ratelimit/ARCH.md` for the underlying pattern.
+
+**LOW**
+- Folder layout: `MfaService` in `application/`, `MfaSecretEntity`/`MfaSecretRepository` in
+  `domain/`, `MfaSecretCipher` in `ports/`, `AesGcmMfaSecretCipher` in `adapters/` — mirrors every
+  existing capability in this library, no new convention introduced.
+- `MfaSecretRepository.upsertPending` uses find-then-`save()`, not `BaseRepository.upsert()` —
+  caught live: `upsert()` builds a raw INSERT that bypasses TypeORM's `@CreateDateColumn`/
+  `@UpdateDateColumn` auto-population (MySQL rejects the resulting `DEFAULT` keyword since those
+  columns have no DB-level default without an explicit migration default — see Loop 025's Critical
+  finding). No other repository in this codebase uses `upsert()`, so this isn't a regression from
+  an established pattern.
+
+## Rejected Alternatives
+
+- **API keys or OAuth2/SSO instead of/alongside MFA in this pass.** Confirmed with the user: MFA
+  first, the other two remain open `REQUIREMENTS.md` Tier 1 items with no concrete trigger yet.
+- **A generic "second factor" abstraction supporting multiple MFA methods (TOTP, SMS, WebAuthn) up
+  front.** Rejected as premature — no concrete need for a second method exists yet, and
+  `MfaSecretCipher`/`AuthTokenPurpose.MFA_CHALLENGE` are narrow enough to extend later without a
+  rewrite if one appears (same "don't build the abstraction before the second consumer" discipline
+  `libs/audit/ARCH.md` and `libs/users/ARCH.md` already apply to their own generalization
+  questions).
+- **`otplib` v13.** See Key Decisions HIGH #3.
+
+## CQRS Decision
+
+Not applicable — unchanged from Design 001.
+
+## Event Sourcing Decision
+
+Not applicable — unchanged from Design 001.
+
+## Open Questions / Future Evolution
+
+- **API keys, OAuth2/SSO** — the two remaining Tier 1 "Auth completeness" items, still without a
+  concrete trigger.
+- **Admin-assisted recovery** for a user who both loses their authenticator device *and* exhausts
+  their 10 recovery codes — no such path exists (they'd be locked out of MFA-gated login
+  entirely, though `disableMfa` itself only needs the password, not a second factor, so this isn't
+  a full account lockout). No concrete incident has driven this; revisit if one does.
+- **WebAuthn/passkeys or SMS as additional MFA methods** — see Rejected Alternatives; add only if a
+  concrete need appears.
+
+## Handoff to Improvement Loop
+
+- **Public API surface (additions):** `MfaService`, `MfaSecretCipher` (type), `AesGcmMfaSecretCipher`,
+  `MfaSecretEntity`/`MfaSecretRepository`, `AuthTokenPurpose.MFA_CHALLENGE`/`MFA_RECOVERY_CODE`,
+  six new DTOs (`MfaEnrollResponseDto`, `ConfirmMfaEnrollmentDto`, `MfaRecoveryCodesResponseDto`,
+  `DisableMfaDto`, `MfaChallengeResponseDto`, `VerifyMfaDto`), six new error classes
+  (`MfaConfigurationError`, `MfaChallengeInvalidError`, `MfaCodeInvalidError`,
+  `MfaEnrollmentNotPendingError`, `MfaAlreadyEnabledError`, `MfaNotEnabledError`).
+- **Public API surface (revised, breaking within the module but not for external callers of the
+  HTTP API):** `AuthService.login` returns `Promise<AuthSession | MfaChallenge>` instead of
+  `Promise<AuthSession>`; `AuthService`'s constructor gains a required trailing `MfaService`
+  parameter.
+- **Module boundaries:** unchanged — `libs/auth` already depended on `@/audit` (Design 007);
+  `MfaService` reuses that existing dependency for `mfa.enabled`/`mfa.disabled` audit entries
+  rather than introducing a new one.
+- `apps/server/src/app.module.ts`: new `AUTH_MFA_ENCRYPTION_KEY` env var (optional — MFA stays
+  inert without it), new `mfa-verify` rate limiter, new `MfaSecrets1753400000000` migration merged
+  into the existing `AUTH_MIGRATIONS` array (already wired into `DatabaseModule.forRoot`).

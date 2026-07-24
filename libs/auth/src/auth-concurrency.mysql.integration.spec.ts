@@ -118,6 +118,8 @@ describeIfMysql('libs/auth concurrency integration (real MySQL)', () => {
       new Argon2PasswordHasher(),
       events,
       new NoopAccessTokenDenylist(),
+      // This suite doesn't exercise MFA — only RBAC concurrency.
+      { isEnabled: () => Promise.resolve(false) } as never,
     );
     authorizationService = new AuthorizationService(
       userRepo,

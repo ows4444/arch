@@ -10,6 +10,7 @@ import {
   type RefreshTokenMetadata,
 } from './refresh-token.service';
 import { EmailVerificationService } from './email-verification.service';
+import { MfaService } from './mfa.service';
 import {
   ACCESS_TOKEN_DENYLIST,
   AUTH_EVENT_PUBLISHER,
@@ -28,6 +29,8 @@ import type { LoginDto } from '../dto/login.dto';
 import { UniqueEmailSpecification } from '../specifications/unique-email.specification';
 
 export interface AuthSession {
+  mfaRequired?: false;
+
   userId: string;
 
   accessToken: string;
@@ -37,6 +40,21 @@ export interface AuthSession {
   refreshToken: string;
 
   refreshTokenExpiresAt: Date;
+}
+
+/**
+ * Returned from `login` instead of `AuthSession` when the account has MFA
+ * enabled — the password was correct, but no access/refresh token is
+ * issued yet. The caller exchanges `challengeToken` (+ a TOTP/recovery
+ * code) via `AuthController`'s `/auth/mfa/verify` for a real
+ * `AuthSession`. See `MfaService.issueChallenge`/`completeMfaLogin` below.
+ */
+export interface MfaChallenge {
+  mfaRequired: true;
+
+  challengeToken: string;
+
+  challengeExpiresAt: Date;
 }
 
 @Injectable()
@@ -53,6 +71,7 @@ export class AuthService {
     private readonly events: AuthEventPublisher,
     @Inject(ACCESS_TOKEN_DENYLIST)
     private readonly denylist: AccessTokenDenylist,
+    private readonly mfa: MfaService,
   ) {}
 
   async register(dto: RegisterDto): Promise<UserEntity> {
@@ -85,7 +104,7 @@ export class AuthService {
   async login(
     dto: LoginDto,
     metadata?: RefreshTokenMetadata,
-  ): Promise<AuthSession> {
+  ): Promise<AuthSession | MfaChallenge> {
     const user = await this.users.findByEmail(dto.email.toLowerCase());
 
     if (!user) {
@@ -109,11 +128,78 @@ export class AuthService {
       throw new AccountDisabledError();
     }
 
+    if (await this.mfa.isEnabled(user.id)) {
+      const challenge = await this.mfa.issueChallenge(user.id);
+
+      return {
+        mfaRequired: true,
+        challengeToken: challenge.challengeToken,
+        challengeExpiresAt: challenge.expiresAt,
+      };
+    }
+
     const session = await this.issueSession(user, metadata);
 
     await this.events.publishUserLoggedIn({ userId: user.id, at: new Date() });
 
     return session;
+  }
+
+  /**
+   * Completes the two-step MFA login `login` starts by returning an
+   * `MfaChallenge` instead of a session. Re-verifies account status
+   * (mirroring `refresh`) since the challenge may have been issued a few
+   * minutes ago — an admin could have disabled the account in between.
+   */
+  async completeMfaLogin(
+    rawChallengeToken: string,
+    code: string,
+    metadata?: RefreshTokenMetadata,
+  ): Promise<AuthSession> {
+    const userId = await this.mfa.verifyChallenge(rawChallengeToken, code);
+    const user = await this.users.findById(userId);
+
+    if (!user || user.status !== UserStatus.ACTIVE) {
+      throw new AccountDisabledError();
+    }
+
+    const session = await this.issueSession(user, metadata);
+
+    await this.events.publishUserLoggedIn({ userId: user.id, at: new Date() });
+
+    return session;
+  }
+
+  /**
+   * Password re-verification before disabling MFA — same "prove you're
+   * still you" gate `changePassword` already applies, appropriate here
+   * since disabling MFA weakens the account's own protection.
+   */
+  async disableMfa(userId: string, currentPassword: string): Promise<void> {
+    const user = await this.users.findById(userId);
+
+    if (!user) {
+      throw new UserNotFoundError(userId);
+    }
+
+    const valid = await this.passwordHasher.verify(
+      user.passwordHash,
+      currentPassword,
+    );
+
+    if (!valid) {
+      throw new InvalidCredentialsError();
+    }
+
+    await this.mfa.disable(userId);
+  }
+
+  beginMfaEnrollment(userId: string, email: string) {
+    return this.mfa.beginEnrollment(userId, email);
+  }
+
+  confirmMfaEnrollment(userId: string, code: string): Promise<string[]> {
+    return this.mfa.confirmEnrollment(userId, code);
   }
 
   async refresh(

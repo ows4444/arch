@@ -25,7 +25,7 @@ The platform is **infrastructure-first**: seven mature shared libraries and two 
 
 | Module | Where | Missing |
 |---|---|---|
-| Authentication | `libs/auth` | login/logout, refresh tokens, JWT, forgot/reset password, email verification, change-password, and device management (list/revoke own active sessions, `LOOP.md` Loop 022, 2026-07-24) are done. Missing: MFA/2FA, API keys, OAuth2, SSO |
+| Authentication | `libs/auth` | login/logout, refresh tokens, JWT, forgot/reset password, email verification, change-password, device management (list/revoke own active sessions, Loop 022), and TOTP-based MFA/2FA (enroll/confirm/disable, recovery codes, two-step login, `ARCH.md` Design 009 + `LOOP.md` Loop 025, 2026-07-24, live-verified against real MySQL/Redis/RabbitMQ) are done. Missing: API keys, OAuth2, SSO |
 | Authorization | `libs/auth/application/authorization.service.ts` | RBAC only. Missing: policy engine, resource-level/ownership checks, dynamic permissions |
 | Rate limiting | `libs/ratelimit` | limiting itself is done. Missing: API versioning, API docs, API analytics — the rest of a full API-management layer |
 | Health/monitoring | `apps/server/src/health` | liveness/readiness only. Missing: metrics, service-status aggregation, dependency health beyond the basics |
@@ -64,7 +64,7 @@ Risk scale per `ci.loop` §18: LOW / MEDIUM / HIGH / CRITICAL.
 
 | Item | Risk | Why this order |
 |---|---|---|
-| Auth completeness: MFA, API keys, OAuth2/SSO (forgot/reset password and device management done, 2026-07-23/24) | HIGH (auth surface) | `libs/auth` already exists; this closes a correctness gap rather than opening a new bounded context |
+| Auth completeness: API keys, OAuth2/SSO (forgot/reset password, device management, and MFA/2FA done, 2026-07-23/24) | HIGH (auth surface) | `libs/auth` already exists; this closes a correctness gap rather than opening a new bounded context |
 | Authorization: policy engine, resource-level/ownership checks | HIGH | Every future domain module (Users, Compliance, ...) will need scoped checks, not just role checks |
 | Audit Module | MEDIUM | Hooks into existing `libs/database` repositories/transactions; no new architecture required |
 | Structured Logging / Observability | MEDIUM | Logs → structured JSON done (2026-07-23, `apps/server/LOOP.md` Loop 005). Remaining: metrics export, trace/span propagation (needs an APM backend choice) |
@@ -269,3 +269,22 @@ Risk scale per `ci.loop` §18: LOW / MEDIUM / HIGH / CRITICAL.
   `{ timezone: 'UTC' }` was removed. Live-verified against real MySQL with no `TZ=UTC` process
   override needed — the process-level fix from the entry above remains in place as defense-in-depth,
   but is no longer the only thing preventing drift.
+- **2026-07-24** — With every `libs/*` improvement loop at its own natural stop condition (no
+  library had an open Critical/High/Medium finding) and `libs/ratelimit` wiring confirmed already
+  complete on inspection (Designs 006-008 had closed it in an earlier session, unreflected in the
+  moment this was checked), picked Tier 1's Auth completeness item as the next work: three
+  sub-items (MFA/2FA, API keys, OAuth2/SSO), and per `ci.loop` §17 (no speculative work without a
+  concrete need) the user chose MFA/2FA first — highest security value against the existing
+  session model, no external IdP dependency, unlike the other two. Ran `ci.loop` Section 0 (Design
+  Mode) for this addition to the existing Authentication bounded context (`libs/auth/ARCH.md`
+  Design 009): two-step login (password → challenge → verify), `otplib`-based TOTP, single-use
+  recovery codes — all confirmed with the user before implementing. Implemented in the same
+  session (`libs/auth/LOOP.md` Loop 025) and live-verified end to end against real
+  MySQL/Redis/RabbitMQ, which caught a real Critical bug: `MfaSecretRepository`'s original
+  `upsert()`-based implementation emitted a raw SQL `DEFAULT` for `@CreateDateColumn`/
+  `@UpdateDateColumn` fields that the new migration hadn't given a DB-level default to — invisible
+  to `typecheck`/`lint`/`test`/`build`, only surfaced against real MySQL. Fixed on both ends
+  (find-then-`save()` instead of `upsert()`, migration given the same `default: 'CURRENT_TIMESTAMP'`
+  clause `InitialAuthSchema`'s `auth_users` table already uses), re-verified via a full
+  drop-table-and-re-migrate cycle. Moves Auth completeness from three open sub-items to two (API
+  keys, OAuth2/SSO — still without a concrete trigger).

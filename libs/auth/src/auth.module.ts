@@ -4,6 +4,7 @@ import {
   ACCESS_TOKEN_DENYLIST,
   AUTH_EVENT_PUBLISHER,
   AUTH_MODULE_OPTIONS,
+  MFA_SECRET_CIPHER,
   PASSWORD_HASHER,
 } from './auth.constants';
 import type { AuthModuleAsyncOptions, AuthModuleOptions } from './auth.types';
@@ -14,9 +15,11 @@ import { TokenService } from './application/token.service';
 import { RefreshTokenService } from './application/refresh-token.service';
 import { PasswordResetService } from './application/password-reset.service';
 import { EmailVerificationService } from './application/email-verification.service';
+import { MfaService } from './application/mfa.service';
 import { Argon2PasswordHasher } from './adapters/argon2-password-hasher';
 import { NoopAccessTokenDenylist } from './adapters/noop-access-token-denylist';
 import { NoopAuthEventPublisher } from './adapters/noop-auth-event-publisher';
+import { AesGcmMfaSecretCipher } from './adapters/aes-gcm-mfa-secret-cipher';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { PermissionsGuard } from './guards/permissions.guard';
 import { RolesGuard } from './guards/roles.guard';
@@ -29,12 +32,14 @@ const CORE_EXPORTS = [
   TokenService,
   PasswordResetService,
   EmailVerificationService,
+  MfaService,
   JwtAuthGuard,
   PermissionsGuard,
   RolesGuard,
   PASSWORD_HASHER,
   ACCESS_TOKEN_DENYLIST,
   AUTH_EVENT_PUBLISHER,
+  MFA_SECRET_CIPHER,
 ];
 
 @Global()
@@ -68,6 +73,12 @@ export class AuthModule {
           inject: [NoopAuthEventPublisher],
           useFactory: (fallback: NoopAuthEventPublisher) =>
             options.eventPublisher ?? fallback,
+        },
+        {
+          provide: MFA_SECRET_CIPHER,
+          useFactory: () =>
+            options.mfaSecretCipher ??
+            new AesGcmMfaSecretCipher(options.mfa?.encryptionKey),
         },
         ...this.coreProviders(),
       ],
@@ -115,6 +126,13 @@ export class AuthModule {
             fallback: NoopAuthEventPublisher,
           ) => moduleOptions.eventPublisher ?? fallback,
         },
+        {
+          provide: MFA_SECRET_CIPHER,
+          inject: [AUTH_MODULE_OPTIONS],
+          useFactory: (moduleOptions: AuthModuleOptions) =>
+            moduleOptions.mfaSecretCipher ??
+            new AesGcmMfaSecretCipher(moduleOptions.mfa?.encryptionKey),
+        },
         ...this.coreProviders(),
       ],
       exports: CORE_EXPORTS,
@@ -127,6 +145,7 @@ export class AuthModule {
       RefreshTokenService,
       EmailVerificationService,
       PasswordResetService,
+      MfaService,
       AuthService,
       AuthorizationService,
       JwtAuthGuard,

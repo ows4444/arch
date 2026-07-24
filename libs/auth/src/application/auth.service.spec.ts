@@ -50,6 +50,14 @@ describe('AuthService', () => {
       deny: jest.fn().mockResolvedValue(undefined),
       isDenied: jest.fn(),
     };
+    const mfa = {
+      isEnabled: jest.fn().mockResolvedValue(false),
+      issueChallenge: jest.fn(),
+      verifyChallenge: jest.fn(),
+      disable: jest.fn().mockResolvedValue(undefined),
+      beginEnrollment: jest.fn(),
+      confirmEnrollment: jest.fn(),
+    };
 
     const service = new AuthService(
       users as never,
@@ -59,6 +67,7 @@ describe('AuthService', () => {
       passwordHasher,
       events,
       denylist,
+      mfa as never,
     );
 
     return {
@@ -70,6 +79,7 @@ describe('AuthService', () => {
       passwordHasher,
       events,
       denylist,
+      mfa,
     };
   }
 
@@ -133,6 +143,10 @@ describe('AuthService', () => {
         password: 'correct-password',
       });
 
+      if (session.mfaRequired) {
+        throw new Error('expected a session, not an MFA challenge');
+      }
+
       expect(session.accessToken).toBe('access-token');
       expect(session.refreshToken).toBe('refresh-token');
       expect(refreshTokens.issue).toHaveBeenCalledWith('user-1', undefined);
@@ -193,6 +207,109 @@ describe('AuthService', () => {
       await expect(
         service.login({ email: 'a@example.com', password: 'correct' }),
       ).rejects.toThrow(EmailNotVerifiedError);
+    });
+
+    it('returns an MFA challenge instead of a session when MFA is enabled, without issuing a refresh token', async () => {
+      const { service, users, passwordHasher, refreshTokens, mfa, events } =
+        setup();
+      users.findByEmail.mockResolvedValue({
+        id: 'user-1',
+        email: 'a@example.com',
+        passwordHash: 'hashed',
+        status: UserStatus.ACTIVE,
+        roles: [],
+      });
+      passwordHasher.verify.mockResolvedValue(true);
+      mfa.isEnabled.mockResolvedValue(true);
+      mfa.issueChallenge.mockResolvedValue({
+        challengeToken: 'challenge-token',
+        expiresAt: new Date(Date.now() + 300_000),
+      });
+
+      const result = await service.login({
+        email: 'a@example.com',
+        password: 'correct-password',
+      });
+
+      expect(result).toEqual(
+        expect.objectContaining({
+          mfaRequired: true,
+          challengeToken: 'challenge-token',
+        }),
+      );
+      expect(mfa.issueChallenge).toHaveBeenCalledWith('user-1');
+      expect(refreshTokens.issue).not.toHaveBeenCalled();
+      expect(events.publishUserLoggedIn).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('completeMfaLogin', () => {
+    it('issues a session for a verified challenge', async () => {
+      const { service, users, mfa, refreshTokens, events } = setup();
+      mfa.verifyChallenge.mockResolvedValue('user-1');
+      users.findById.mockResolvedValue({
+        id: 'user-1',
+        email: 'a@example.com',
+        status: UserStatus.ACTIVE,
+        roles: [],
+      });
+
+      const session = await service.completeMfaLogin(
+        'challenge-token',
+        '123456',
+      );
+
+      expect(session.accessToken).toBe('access-token');
+      expect(refreshTokens.issue).toHaveBeenCalledWith('user-1', undefined);
+      expect(events.publishUserLoggedIn).toHaveBeenCalledWith(
+        expect.objectContaining({ userId: 'user-1' }),
+      );
+    });
+
+    it('rejects if the account is no longer active', async () => {
+      const { service, users, mfa } = setup();
+      mfa.verifyChallenge.mockResolvedValue('user-1');
+      users.findById.mockResolvedValue({
+        id: 'user-1',
+        status: UserStatus.DISABLED,
+      });
+
+      await expect(
+        service.completeMfaLogin('challenge-token', '123456'),
+      ).rejects.toThrow(AccountDisabledError);
+    });
+  });
+
+  describe('disableMfa', () => {
+    it('verifies the current password before disabling', async () => {
+      const { service, users, passwordHasher, mfa } = setup();
+      users.findById.mockResolvedValue({
+        id: 'user-1',
+        passwordHash: 'old-hash',
+      });
+      passwordHasher.verify.mockResolvedValue(true);
+
+      await service.disableMfa('user-1', 'current-password');
+
+      expect(passwordHasher.verify).toHaveBeenCalledWith(
+        'old-hash',
+        'current-password',
+      );
+      expect(mfa.disable).toHaveBeenCalledWith('user-1');
+    });
+
+    it('rejects an incorrect password without disabling', async () => {
+      const { service, users, passwordHasher, mfa } = setup();
+      users.findById.mockResolvedValue({
+        id: 'user-1',
+        passwordHash: 'old-hash',
+      });
+      passwordHasher.verify.mockResolvedValue(false);
+
+      await expect(
+        service.disableMfa('user-1', 'wrong-password'),
+      ).rejects.toThrow(InvalidCredentialsError);
+      expect(mfa.disable).not.toHaveBeenCalled();
     });
   });
 

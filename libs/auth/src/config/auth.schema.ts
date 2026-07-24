@@ -28,4 +28,17 @@ export class AuthEnvironmentSchema {
   @Min(1)
   @IsOptional()
   AUTH_REFRESH_TOKEN_TTL_SECONDS!: number;
+
+  /**
+   * Encrypts TOTP secrets at rest (see `AesGcmMfaSecretCipher`). Optional —
+   * MFA stays inert (fails only if actually used) until this is set, so
+   * existing deployments don't need it just to boot.
+   */
+  @Expose()
+  @IsString()
+  @MinLength(32, {
+    message: 'AUTH_MFA_ENCRYPTION_KEY must be at least 32 characters long.',
+  })
+  @IsOptional()
+  AUTH_MFA_ENCRYPTION_KEY?: string;
 }

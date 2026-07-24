@@ -7,6 +7,7 @@ import type {
 import type { PasswordHasher } from './ports/password-hasher.interface';
 import type { AccessTokenDenylist } from './ports/access-token-denylist.interface';
 import type { AuthEventPublisher } from './ports/auth-event-publisher.interface';
+import type { MfaSecretCipher } from './ports/mfa-secret-cipher.interface';
 
 export interface AuthModuleOptions {
   jwt: {
@@ -38,11 +39,27 @@ export interface AuthModuleOptions {
 
   emailVerificationTokenTtlSeconds?: number;
 
+  /**
+   * MFA is inert until this is set — `MfaSecretCipher`'s default AES-GCM
+   * adapter throws `MfaConfigurationError` (lazily, on first actual
+   * enroll/verify call, not at boot) if `encryptionKey` is missing. See
+   * `libs/auth/ARCH.md` Design 009.
+   */
+  mfa?: {
+    encryptionKey?: string;
+
+    challengeTtlSeconds?: number;
+
+    recoveryCodesCount?: number;
+  };
+
   passwordHasher?: PasswordHasher;
 
   accessTokenDenylist?: AccessTokenDenylist;
 
   eventPublisher?: AuthEventPublisher;
+
+  mfaSecretCipher?: MfaSecretCipher;
 }
 
 export interface AuthOptionsFactory {

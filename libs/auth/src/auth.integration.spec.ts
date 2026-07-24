@@ -7,22 +7,27 @@ type DataSourceManager = ConstructorParameters<typeof RepositoryResolver>[0];
 import { UserRepository } from './domain/user.repository';
 import { RoleRepository } from './domain/role.repository';
 import { PermissionRepository } from './domain/permission.repository';
+import { authenticator } from 'otplib';
 import { RefreshTokenRepository } from './domain/refresh-token.repository';
 import { AuthTokenRepository } from './domain/auth-token.repository';
+import { MfaSecretRepository } from './domain/mfa-secret.repository';
 import { UserStatus } from './domain/user-status.enum';
 import { AUTH_TYPEORM_ENTITIES } from './persistence/entities';
-import { AuthService } from './application/auth.service';
+import { AuthService, type AuthSession } from './application/auth.service';
 import { AuthorizationService } from './application/authorization.service';
 import { TokenService } from './application/token.service';
 import { RefreshTokenService } from './application/refresh-token.service';
 import { EmailVerificationService } from './application/email-verification.service';
 import { PasswordResetService } from './application/password-reset.service';
+import { MfaService } from './application/mfa.service';
 import { Argon2PasswordHasher } from './adapters/argon2-password-hasher';
 import { NoopAccessTokenDenylist } from './adapters/noop-access-token-denylist';
+import { AesGcmMfaSecretCipher } from './adapters/aes-gcm-mfa-secret-cipher';
 import { InvalidCredentialsError } from './errors/invalid-credentials.error';
 import { TokenRevokedError } from './errors/token-revoked.error';
 import { EmailNotVerifiedError } from './errors/email-not-verified.error';
 import { PasswordResetTokenInvalidError } from './errors/password-reset-token-invalid.error';
+import { MfaCodeInvalidError } from './errors/mfa-code-invalid.error';
 import type { AuthModuleOptions } from './auth.types';
 import type { AuthEventPublisher } from './ports/auth-event-publisher.interface';
 
@@ -46,6 +51,7 @@ describe('libs/auth integration (real DataSource)', () => {
   let authorizationService: AuthorizationService;
   let emailVerificationService: EmailVerificationService;
   let passwordResetService: PasswordResetService;
+  let mfaService: MfaService;
   let capturedVerificationToken: string | undefined;
   let capturedResetToken: string | undefined;
 
@@ -53,6 +59,19 @@ describe('libs/auth integration (real DataSource)', () => {
   async function activate(email: string): Promise<void> {
     const user = await userRepo.findByEmail(email);
     await userRepo.save({ id: user!.id, status: UserStatus.ACTIVE });
+  }
+
+  /** None of these tests enable MFA unless stated — asserts the union narrows to a real session. */
+  async function loginSession(
+    ...args: Parameters<AuthService['login']>
+  ): Promise<AuthSession> {
+    const result = await authService.login(...args);
+
+    if (result.mfaRequired) {
+      throw new Error('Did not expect an MFA challenge.');
+    }
+
+    return result;
   }
 
   beforeEach(async () => {
@@ -78,9 +97,11 @@ describe('libs/auth integration (real DataSource)', () => {
     permissionRepo = new PermissionRepository(DatabaseRole.WRITE, resolver);
     refreshTokenRepo = new RefreshTokenRepository(DatabaseRole.WRITE, resolver);
     authTokenRepo = new AuthTokenRepository(DatabaseRole.WRITE, resolver);
+    const mfaSecretRepo = new MfaSecretRepository(DatabaseRole.WRITE, resolver);
 
     const options: AuthModuleOptions = {
       jwt: { secret: 'integration-test-secret-value-1234567890' },
+      mfa: { encryptionKey: 'integration-test-mfa-key-1234567890' },
     };
     const tokenService = new TokenService(
       new JwtService({ secret: options.jwt.secret }),
@@ -117,6 +138,15 @@ describe('libs/auth integration (real DataSource)', () => {
     );
     const passwordHasher = new Argon2PasswordHasher();
     const denylist = new NoopAccessTokenDenylist();
+    mfaService = new MfaService(
+      mfaSecretRepo,
+      authTokenRepo,
+      new AesGcmMfaSecretCipher(options.mfa?.encryptionKey),
+      options,
+      // Real audit persistence isn't this suite's concern — see
+      // libs/audit's own tests for that.
+      { record: () => Promise.resolve() } as never,
+    );
 
     authService = new AuthService(
       userRepo,
@@ -126,6 +156,7 @@ describe('libs/auth integration (real DataSource)', () => {
       passwordHasher,
       events,
       denylist,
+      mfaService,
     );
     authorizationService = new AuthorizationService(
       userRepo,
@@ -157,7 +188,7 @@ describe('libs/auth integration (real DataSource)', () => {
     });
     await activate('alice@example.com');
 
-    const session = await authService.login({
+    const session = await loginSession({
       email: 'Alice@Example.com',
       password: 'correct-horse-battery-staple',
     });
@@ -176,7 +207,7 @@ describe('libs/auth integration (real DataSource)', () => {
     });
     await activate('ivy@example.com');
 
-    const session = await authService.login(
+    const session = await loginSession(
       { email: 'ivy@example.com', password: 'correct-horse-battery-staple' },
       { createdByIp: '203.0.113.9', deviceId: 'device-abc-123' },
     );
@@ -194,7 +225,7 @@ describe('libs/auth integration (real DataSource)', () => {
     });
 
     await expect(
-      authService.login({ email: 'bob@example.com', password: 'wrong' }),
+      loginSession({ email: 'bob@example.com', password: 'wrong' }),
     ).rejects.toThrow(InvalidCredentialsError);
   });
 
@@ -293,7 +324,7 @@ describe('libs/auth integration (real DataSource)', () => {
       password: 'correct-horse-battery-staple',
     });
     await activate('dave@example.com');
-    const session = await authService.login({
+    const session = await loginSession({
       email: 'dave@example.com',
       password: 'correct-horse-battery-staple',
     });
@@ -325,7 +356,7 @@ describe('libs/auth integration (real DataSource)', () => {
     const sessions = [];
     for (let i = 0; i < 5; i++) {
       sessions.push(
-        await authService.login({
+        await loginSession({
           email: 'nina@example.com',
           password: 'correct-horse-battery-staple',
         }),
@@ -333,7 +364,7 @@ describe('libs/auth integration (real DataSource)', () => {
     }
 
     // A 6th concurrent login succeeds rather than being rejected...
-    const sixth = await authService.login({
+    const sixth = await loginSession({
       email: 'nina@example.com',
       password: 'correct-horse-battery-staple',
     });
@@ -361,7 +392,7 @@ describe('libs/auth integration (real DataSource)', () => {
       password: 'correct-horse-battery-staple',
     });
     await activate('erin@example.com');
-    const session = await authService.login({
+    const session = await loginSession({
       email: 'erin@example.com',
       password: 'correct-horse-battery-staple',
     });
@@ -389,15 +420,15 @@ describe('libs/auth integration (real DataSource)', () => {
     });
     await activate('petra@example.com');
 
-    const laptop = await authService.login(
+    const laptop = await loginSession(
       { email: 'oscar@example.com', password: 'correct-horse-battery-staple' },
       { deviceId: 'laptop' },
     );
-    const phone = await authService.login(
+    const phone = await loginSession(
       { email: 'oscar@example.com', password: 'correct-horse-battery-staple' },
       { deviceId: 'phone' },
     );
-    const other = await authService.login({
+    const other = await loginSession({
       email: 'petra@example.com',
       password: 'correct-horse-battery-staple',
     });
@@ -442,7 +473,7 @@ describe('libs/auth integration (real DataSource)', () => {
     await activate('quinn@example.com');
     const quinn = await userRepo.findByEmail('quinn@example.com');
 
-    const live = await authService.login({
+    const live = await loginSession({
       email: 'quinn@example.com',
       password: 'correct-horse-battery-staple',
     });
@@ -499,7 +530,7 @@ describe('libs/auth integration (real DataSource)', () => {
     });
 
     await expect(
-      authService.login({
+      loginSession({
         email: 'grace@example.com',
         password: 'correct-horse-battery-staple',
       }),
@@ -508,7 +539,7 @@ describe('libs/auth integration (real DataSource)', () => {
     expect(capturedVerificationToken).toEqual(expect.any(String));
     await emailVerificationService.confirm(capturedVerificationToken!);
 
-    const session = await authService.login({
+    const session = await loginSession({
       email: 'grace@example.com',
       password: 'correct-horse-battery-staple',
     });
@@ -539,7 +570,7 @@ describe('libs/auth integration (real DataSource)', () => {
       password: 'original-password-value',
     });
     await activate('ivan@example.com');
-    const session = await authService.login({
+    const session = await loginSession({
       email: 'ivan@example.com',
       password: 'original-password-value',
     });
@@ -554,14 +585,14 @@ describe('libs/auth integration (real DataSource)', () => {
 
     // The old password no longer works.
     await expect(
-      authService.login({
+      loginSession({
         email: 'ivan@example.com',
         password: 'original-password-value',
       }),
     ).rejects.toThrow(InvalidCredentialsError);
 
     // The new one does.
-    const relogged = await authService.login({
+    const relogged = await loginSession({
       email: 'ivan@example.com',
       password: 'brand-new-password-value',
     });
@@ -584,7 +615,7 @@ describe('libs/auth integration (real DataSource)', () => {
       passwordResetService.confirmReset('not-a-real-token', 'irrelevant-new'),
     ).rejects.toThrow(PasswordResetTokenInvalidError);
 
-    const session = await authService.login({
+    const session = await loginSession({
       email: 'judy@example.com',
       password: 'original-password-value',
     });
@@ -604,7 +635,7 @@ describe('libs/auth integration (real DataSource)', () => {
       password: 'original-password-value',
     });
     await activate('kevin@example.com');
-    const session = await authService.login({
+    const session = await loginSession({
       email: 'kevin@example.com',
       password: 'original-password-value',
     });
@@ -618,14 +649,14 @@ describe('libs/auth integration (real DataSource)', () => {
 
     // The old password no longer works.
     await expect(
-      authService.login({
+      loginSession({
         email: 'kevin@example.com',
         password: 'original-password-value',
       }),
     ).rejects.toThrow(InvalidCredentialsError);
 
     // The new one does.
-    const relogged = await authService.login({
+    const relogged = await loginSession({
       email: 'kevin@example.com',
       password: 'brand-new-password-value',
     });
@@ -649,10 +680,147 @@ describe('libs/auth integration (real DataSource)', () => {
       authService.changePassword(user!.id, 'wrong-password', 'irrelevant-new'),
     ).rejects.toThrow(InvalidCredentialsError);
 
-    const session = await authService.login({
+    const session = await loginSession({
       email: 'laura@example.com',
       password: 'original-password-value',
     });
     expect(session.accessToken.split('.')).toHaveLength(3);
+  });
+
+  describe('MFA', () => {
+    async function enrollAndEnable(userId: string, email: string) {
+      const enrollment = await mfaService.beginEnrollment(userId, email);
+      await mfaService.confirmEnrollment(
+        userId,
+        authenticator.generate(enrollment.secret),
+      );
+
+      return enrollment.secret;
+    }
+
+    it('drives the full enroll -> two-step login -> verify flow against real persistence', async () => {
+      await authService.register({
+        email: 'mona@example.com',
+        password: 'correct-horse-battery-staple',
+      });
+      await activate('mona@example.com');
+      const user = await userRepo.findByEmail('mona@example.com');
+      const secret = await enrollAndEnable(user!.id, 'mona@example.com');
+
+      const challenge = await authService.login({
+        email: 'mona@example.com',
+        password: 'correct-horse-battery-staple',
+      });
+      expect(challenge.mfaRequired).toBe(true);
+      if (!challenge.mfaRequired) {
+        throw new Error('expected an MFA challenge');
+      }
+
+      const session = await authService.completeMfaLogin(
+        challenge.challengeToken,
+        authenticator.generate(secret),
+      );
+      expect(session.accessToken.split('.')).toHaveLength(3);
+      expect(session.refreshToken).toEqual(expect.any(String));
+    });
+
+    it('rejects verification with an incorrect TOTP code, leaving the challenge usable', async () => {
+      await authService.register({
+        email: 'nora@example.com',
+        password: 'correct-horse-battery-staple',
+      });
+      await activate('nora@example.com');
+      const user = await userRepo.findByEmail('nora@example.com');
+      const secret = await enrollAndEnable(user!.id, 'nora@example.com');
+
+      const challenge = await authService.login({
+        email: 'nora@example.com',
+        password: 'correct-horse-battery-staple',
+      });
+      if (!challenge.mfaRequired) {
+        throw new Error('expected an MFA challenge');
+      }
+
+      await expect(
+        authService.completeMfaLogin(challenge.challengeToken, '000000'),
+      ).rejects.toThrow(MfaCodeInvalidError);
+
+      // The challenge itself wasn't consumed by the failed attempt — the
+      // correct code still works afterward.
+      const session = await authService.completeMfaLogin(
+        challenge.challengeToken,
+        authenticator.generate(secret),
+      );
+      expect(session.accessToken.split('.')).toHaveLength(3);
+    });
+
+    it('accepts a recovery code once, then rejects reusing it', async () => {
+      await authService.register({
+        email: 'oscar@example.com',
+        password: 'correct-horse-battery-staple',
+      });
+      await activate('oscar@example.com');
+      const user = await userRepo.findByEmail('oscar@example.com');
+      const enrollment = await mfaService.beginEnrollment(
+        user!.id,
+        'oscar@example.com',
+      );
+      const recoveryCodes = await mfaService.confirmEnrollment(
+        user!.id,
+        authenticator.generate(enrollment.secret),
+      );
+      const recoveryCode = recoveryCodes[0]!;
+
+      const challenge = await authService.login({
+        email: 'oscar@example.com',
+        password: 'correct-horse-battery-staple',
+      });
+      if (!challenge.mfaRequired) {
+        throw new Error('expected an MFA challenge');
+      }
+
+      const session = await authService.completeMfaLogin(
+        challenge.challengeToken,
+        recoveryCode,
+      );
+      expect(session.accessToken.split('.')).toHaveLength(3);
+
+      const secondChallenge = await authService.login({
+        email: 'oscar@example.com',
+        password: 'correct-horse-battery-staple',
+      });
+      if (!secondChallenge.mfaRequired) {
+        throw new Error('expected an MFA challenge');
+      }
+
+      await expect(
+        authService.completeMfaLogin(
+          secondChallenge.challengeToken,
+          recoveryCode,
+        ),
+      ).rejects.toThrow(MfaCodeInvalidError);
+    });
+
+    it('disabling MFA requires the current password and restores single-step login', async () => {
+      await authService.register({
+        email: 'priya@example.com',
+        password: 'correct-horse-battery-staple',
+      });
+      await activate('priya@example.com');
+      const user = await userRepo.findByEmail('priya@example.com');
+      await enrollAndEnable(user!.id, 'priya@example.com');
+
+      await expect(
+        authService.disableMfa(user!.id, 'wrong-password'),
+      ).rejects.toThrow(InvalidCredentialsError);
+
+      await authService.disableMfa(user!.id, 'correct-horse-battery-staple');
+
+      const session = await loginSession({
+        email: 'priya@example.com',
+        password: 'correct-horse-battery-staple',
+      });
+      expect(session.accessToken.split('.')).toHaveLength(3);
+    });
   });
 });

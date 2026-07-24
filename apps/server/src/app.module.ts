@@ -274,6 +274,11 @@ function validateAuthEnvironment(): AuthEnvironmentSchema {
         // ceiling for legitimate account-cleanup-type work.
         'change-password': { limit: 10, windowMs: 60 * 60_000 },
         'change-password:role:admin': { limit: 50, windowMs: 60 * 60_000 },
+        // Same shape as password-reset/email-verification: one flow
+        // (POST /auth/mfa/verify), 5 attempts per 15 minutes per IP —
+        // throttles TOTP/recovery-code guessing against a stolen or
+        // guessed challenge token (see libs/auth/ARCH.md Design 009).
+        'mfa-verify': { limit: 5, windowMs: 15 * 60_000 },
       },
       store: {
         type: 'redis',
@@ -304,6 +309,12 @@ function validateAuthEnvironment(): AuthEnvironmentSchema {
           },
           ...(env.AUTH_REFRESH_TOKEN_TTL_SECONDS !== undefined && {
             refreshTokenTtlSeconds: env.AUTH_REFRESH_TOKEN_TTL_SECONDS,
+          }),
+          // MFA stays inert (AesGcmMfaSecretCipher throws only if actually
+          // used) when AUTH_MFA_ENCRYPTION_KEY is unset — see
+          // libs/auth/ARCH.md Design 009.
+          ...(env.AUTH_MFA_ENCRYPTION_KEY !== undefined && {
+            mfa: { encryptionKey: env.AUTH_MFA_ENCRYPTION_KEY },
           }),
           // Instant access-token revocation on logout/password change,
           // instead of relying solely on the access token's own short
