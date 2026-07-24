@@ -13,7 +13,20 @@
       "Bash(make check *)",
       "Bash(docker info *)",
       "Bash(break)",
-      "Bash(make compose-up *)"
+      "Bash(make compose-up *)",
+      "Bash(npx nest *)",
+      "Bash(git add *)"
+    ],
+    "deny": [
+      "Bash(rm -rf *)",
+      "Bash(git push *)",
+      "Bash(git push --force*)",
+      "Bash(git push -f*)",
+      "Bash(git reset --hard*)",
+      "Bash(git rebase *)"
+    ],
+    "ask": [
+      "Bash(npm publish*)"
     ]
   }
 }
