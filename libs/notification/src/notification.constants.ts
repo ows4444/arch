@@ -1,0 +1,5 @@
+export const NOTIFICATION_MODULE_OPTIONS = Symbol(
+  'NOTIFICATION_MODULE_OPTIONS',
+);
+
+export const EMAIL_SENDER = Symbol('EMAIL_SENDER');
