@@ -2038,3 +2038,101 @@ PASS (`npm run lint`)
 
 - No Critical/High/Medium findings open. `libs/auth` remains at a natural stopping point per
   Section 16 until a new concrete finding or requirement surfaces.
+
+# Loop 023
+
+**Library:** libs/auth
+**Date:** 2026-07-24
+
+## Goal
+
+Fresh adversarial Phase 1/2 pass — the third this library has had (after Loop 012's post-11-loops
+pass and Loop 017/018's same-day pass), and the first since the device-management/session-list
+work (Loop 022) and the `libs/audit`/`libs/notification`/`libs/users` review passes elsewhere this
+session. Focused on the newest, least-scrutinized surfaces: `email-verification.service.ts`,
+`password-reset.service.ts`, `auth-token.repository.ts`, and `refresh-token.service.ts`'s
+session-list/revoke methods, plus a re-check of JWT signing/verification and RBAC guard wiring
+against the prior two adversarial passes' findings.
+
+## Files Reviewed
+
+- `application/{email-verification,password-reset}.service.ts`,
+  `domain/auth-token.repository.ts`, `domain/auth-token.entity.ts` (Design 003's purpose-scoping
+  guarantee — traced every query to confirm `purpose` really is a required, non-optional parameter
+  everywhere, per that design's own stated risk).
+- `application/auth.service.ts`, `application/token.service.ts` (JWT sign/verify — confirmed no
+  asymmetric-key configuration exists anywhere in this library, so the classic RS256/HS256
+  algorithm-confusion attack class doesn't structurally apply here).
+- `domain/user.entity.ts`, `domain/user-status.enum.ts` — traced every place `UserStatus.DISABLED`
+  could ever be set, to understand exactly how reachable it is today.
+- `auth-config.module.ts`, `config/auth.schema.ts` — re-confirmed unchanged since Loop 003/012.
+
+## Problems Found
+
+**Medium**
+- `EmailVerificationService.confirm()` unconditionally set `status: UserStatus.ACTIVE` on
+  successful token verification, regardless of the user's status at redemption time. A
+  verification link is TTL-bound (default 24h per `DEFAULT_EMAIL_VERIFICATION_TOKEN_TTL_SECONDS`),
+  not single-request-bound — if a user's status ever moved away from `UNVERIFIED` through some
+  other path before a still-valid, unused link was redeemed, `confirm()` would silently flip them
+  back to `ACTIVE`. Concretely: no code path anywhere in this library (or its consumers) ever sets
+  `UserStatus.DISABLED` today — confirmed by tracing every reference to the enum — so this is
+  currently unreachable, not a live exploit. But it's a real, forward-looking landmine: the moment
+  an admin-disable feature is built (a plausible, unremarkable addition — every RBAC/audit
+  infrastructure needed for one already exists), a disabled user holding an unexpired, unredeemed
+  verification link from before they were disabled could silently undo the disablement just by
+  clicking an old email link.
+
+## Changes Made
+
+- `EmailVerificationService.confirm()`: added a guard — after the token is validated and consumed,
+  if the user's status isn't `UNVERIFIED`, throws `EmailVerificationTokenInvalidError` instead of
+  proceeding to set `ACTIVE`. The token is still consumed either way (already atomically marked
+  used before this check runs), so a rejected redemption can't be retried.
+- Updated the existing `confirm()` happy-path test to include a real `status: UserStatus.UNVERIFIED`
+  on the mocked user (it previously omitted `status` entirely, which the new guard would have
+  broken). Added a new regression test: a `DISABLED` user's otherwise-valid token redemption is
+  rejected and never reaches `users.save()`.
+
+## Why
+
+Per `ci.loop` §17: this is a narrow, unambiguous correctness fix, not scope creep — "only ever
+transition UNVERIFIED → ACTIVE" is correct under any future design for a disable feature, so fixing
+it now doesn't require inventing or guessing at product decisions the way implementing a full
+disable feature would. Distinct in kind from `libs/users` Loop 004's `deactivate`/`reactivate` gap
+(flagged but not built, since that required real unanswered product questions) — this fix has no
+such ambiguity and no downside for the current, unreachable-today case.
+`PasswordResetService.confirmReset` was checked for the analogous risk and found not to have it:
+resetting a `DISABLED` user's password hash doesn't change their `status`, so `login()`'s existing
+`status !== ACTIVE` check still blocks them afterward — no admin action gets silently undone.
+
+Also re-confirmed (not re-litigated, since nothing had changed): `auth-token.repository.ts`'s
+`purpose` scoping is airtight — `findActiveByHash`/`invalidateActiveForUser` both take `purpose` as
+a required parameter with no default, so Design 003's own named risk (a password-reset token being
+replayable as an email-verification token) has no code path to occur through.
+
+## Tests
+
+`libs/auth` suite: 19 of 20 suites passing (1 mysql-gated suite skipped, unchanged), 155 tests (up
+from 153 — 1 updated, 1 new). Full monorepo `make check`: 159 of 164 suites passing (5 skipped by
+design), 1240 tests passing (up from 1239).
+
+## Build
+
+PASS (`npm run typecheck`)
+
+## Lint
+
+PASS (`npm run lint`)
+
+## Remaining TODO
+
+- Unchanged: MFA/2FA, API keys, OAuth2/SSO — none have a concrete trigger yet.
+- New, low-priority: if/when an admin-disable feature for users is ever built, re-verify this same
+  "don't silently undo a status change via a stale token" reasoning applies to any other token-based
+  flow that gets added later.
+
+## Next Loop
+
+- No Critical/High findings remain open. `libs/auth` remains at a natural stopping point per
+  Section 16 until a new concrete finding or requirement surfaces.

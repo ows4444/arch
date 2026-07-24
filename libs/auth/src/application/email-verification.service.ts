@@ -100,6 +100,19 @@ export class EmailVerificationService {
       throw new EmailVerificationTokenInvalidError();
     }
 
+    // Only ever transitions UNVERIFIED -> ACTIVE, never stomps any other
+    // status. `DISABLED` has no code path that sets it anywhere in this
+    // library today, so this branch is currently unreachable — but a
+    // verification link is long-lived (TTL-bound, not single-request-bound)
+    // and this method's only job is "finish verifying an email," not
+    // "reactivate an account." Unconditionally setting ACTIVE here would
+    // silently undo a future admin-disable action for a user who still
+    // holds a valid, unused, unexpired verification link from before they
+    // were disabled.
+    if (user.status !== UserStatus.UNVERIFIED) {
+      throw new EmailVerificationTokenInvalidError();
+    }
+
     await this.users.save({
       id: user.id,
       status: UserStatus.ACTIVE,

@@ -103,7 +103,10 @@ describe('EmailVerificationService', () => {
         userId: 'user-1',
         expiresAt: new Date(Date.now() + 60_000),
       });
-      users.findById.mockResolvedValue({ id: 'user-1' });
+      users.findById.mockResolvedValue({
+        id: 'user-1',
+        status: UserStatus.UNVERIFIED,
+      });
 
       await service.confirm('raw-token');
 
@@ -113,6 +116,28 @@ describe('EmailVerificationService', () => {
           status: UserStatus.ACTIVE,
         }),
       );
+    });
+
+    it('rejects (without reactivating) a token redeemed by a user who is no longer unverified', async () => {
+      // Regression test: a verification link is TTL-bound, not
+      // single-request-bound — if the user's status ever moves away from
+      // UNVERIFIED through some other path before a still-valid link is
+      // redeemed, confirm() must not silently stomp it back to ACTIVE.
+      const { service, tokens, users } = setup();
+      tokens.findActiveByHash.mockResolvedValue({
+        id: 'token-1',
+        userId: 'user-1',
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      users.findById.mockResolvedValue({
+        id: 'user-1',
+        status: UserStatus.DISABLED,
+      });
+
+      await expect(service.confirm('raw-token')).rejects.toThrow(
+        EmailVerificationTokenInvalidError,
+      );
+      expect(users.save).not.toHaveBeenCalled();
     });
 
     it('rejects an unknown token', async () => {
