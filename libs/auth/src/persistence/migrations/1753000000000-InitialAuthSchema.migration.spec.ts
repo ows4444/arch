@@ -1,5 +1,6 @@
 import { DataSource } from 'typeorm';
 import { InitialAuthSchema1753000000000 } from './1753000000000-InitialAuthSchema.migration';
+import { RefreshTokenDeviceId1753300000000 } from './1753300000000-RefreshTokenDeviceId.migration';
 import { UserEntity } from '../../domain/user.entity';
 import { RoleEntity } from '../../domain/role.entity';
 import { PermissionEntity } from '../../domain/permission.entity';
@@ -12,7 +13,16 @@ describe('InitialAuthSchema migration', () => {
       type: 'better-sqlite3',
       database: ':memory:',
       entities: [UserEntity, RoleEntity, PermissionEntity, RefreshTokenEntity],
-      migrations: [InitialAuthSchema1753000000000],
+      // RefreshTokenDeviceId runs alongside the initial migration (rather
+      // than this spec being scoped to InitialAuthSchema alone) because
+      // this test exercises real `RefreshTokenEntity` inserts against the
+      // migrated schema — the entity always reflects the *current* shape,
+      // so every migration that alters a table this spec touches needs to
+      // run too, or the entity/schema mismatch is exactly what breaks.
+      migrations: [
+        InitialAuthSchema1753000000000,
+        RefreshTokenDeviceId1753300000000,
+      ],
       synchronize: false,
     });
 
@@ -67,16 +77,19 @@ describe('InitialAuthSchema migration', () => {
     expect(loaded?.roles[0]?.permissions[0]?.name).toBe('workflow:read');
 
     const refreshTokenRepo = dataSource.getRepository(RefreshTokenEntity);
-    await refreshTokenRepo.save({
+    const savedRefreshToken = await refreshTokenRepo.save({
       userId: user.id,
       tokenHash: 'hash-of-token',
       familyId: 'family-1',
       expiresAt: new Date(Date.now() + 60_000),
+      deviceId: 'device-abc',
       createdAt: new Date(),
     });
 
     expect(await refreshTokenRepo.count()).toBe(1);
+    expect(savedRefreshToken.deviceId).toBe('device-abc');
 
+    await dataSource.undoLastMigration();
     await dataSource.undoLastMigration();
 
     for (const table of tables) {

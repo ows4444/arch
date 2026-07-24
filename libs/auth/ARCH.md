@@ -480,11 +480,12 @@ store would only add operational cost with no consumer that needs it.
 
 ## Open Questions / Future Evolution
 
-- No email-sending capability exists yet in this monorepo — password
+- ~~No email-sending capability exists yet in this monorepo — password
   reset/email verification stay out of scope until one does (see
   Rejected Alternatives). When it's built, extend via the existing
   `AUTH_EVENT_PUBLISHER` port rather than adding SMTP logic inside
-  `libs/auth`.
+  `libs/auth`.~~ **Resolved — see Design 003.** Built exactly this way:
+  extended `AUTH_EVENT_PUBLISHER` rather than adding SMTP logic here.
 - No stated tenant model anywhere in this monorepo — if multi-tenancy is
   introduced later, `User`/`Role`/`Permission` all need a `tenantId`
   column and every repository query needs tenant scoping; flagged now so
@@ -592,3 +593,309 @@ Unchanged from Design 001 (not applicable).
   `libs/auth/src/index.ts` — no public API change.
 - **Module boundaries (revised):** `libs/auth` may now import `@/validation` directly (see note
   above superseding Design 001's module-boundary list).
+
+---
+
+# Design 003
+
+**Library / Bounded Context:** libs/auth
+**Date:** 2026-07-22
+
+## Goal
+
+Build password reset and email verification — the exact item Design 001 deferred (see Open
+Questions, now marked resolved above) — per direct user request. Retroactively documents
+`libs/auth/LOOP.md` Loop 014, which implemented this without a preceding Design Mode session; this
+entry closes that gap per Section 0.7 ("architecture decisions and code-improvement history are
+different logs worth keeping independently").
+
+## Scale/Team Context Assumed
+
+Unchanged from Design 001.
+
+## Key Decisions (with risk tag)
+
+**HIGH**
+1. **Login now blocks on `UserStatus.UNVERIFIED`.** `register()` previously set every new user
+   `ACTIVE` immediately, silently bypassing the `UNVERIFIED` enum value and `emailVerifiedAt`
+   column Design 001's domain model already carried. Confirmed directly with the user (this
+   changes an existing, live login code path, not a greenfield addition) before implementing —
+   see the two-option question in the Loop 014 conversation. Benefits: fulfills what the domain
+   model was already built for; matches conventional practice (an unverified email shouldn't be
+   able to authenticate). Risks: any existing registered user created before this change is
+   `ACTIVE` already (unaffected — the migration doesn't touch existing rows), but any *new*
+   integration test or consumer that assumed immediate post-registration login now needs an
+   explicit verification step (see Loop 014's `activate()` test helper). Alternative rejected:
+   track-only (informational `emailVerifiedAt`, no login gate) — offered to the user as the
+   lower-risk option; not chosen. Evolution: if a product need emerges for "grace period" logins
+   (allow N days unverified before locking out), that's a new decision, not implied by this one.
+2. **One `auth_tokens` table for both password-reset and email-verification tokens**, not two.
+   The prediction in Design 001's Rejected Alternatives — that this would need "an email-sending
+   dependency (`libs/queue` consumer)" — did **not** materialize: the actual implementation adds
+   zero new dependency on `libs/queue`, only two new methods on the already-existing
+   `AUTH_EVENT_PUBLISHER` port, exactly as Design 001's Open Questions anticipated ("extend via
+   the existing `AUTH_EVENT_PUBLISHER` port rather than adding SMTP logic inside `libs/auth`").
+   Benefits: one migration/entity/repository instead of two identical ones; a `purpose` column is
+   the only thing distinguishing rows. Risk: a bug in purpose-scoping (`findActiveByHash`,
+   `invalidateActiveForUser`) would let a password-reset token be replayed as an email-verification
+   token or vice versa — mitigated by every query taking `purpose` as an explicit, required
+   parameter, not an optional filter. Alternative rejected: two separate tables — would have been
+   pure duplication of an identical schema (see `AuthTokenEntity`'s own doc comment).
+
+**MEDIUM**
+- Password reset revokes every existing refresh token for the user on success (same reasoning
+  `AuthService.logoutAll` already exists for — a reset is exactly the moment a possibly-compromised
+  session should be forced to re-authenticate). Not applied to email verification, which doesn't
+  touch credentials and has no equivalent "possibly compromised" story.
+- `AuthEventPublisher` gained two **required** (not optional) methods
+  (`publishPasswordResetRequested`/`publishEmailVerificationRequested`). Confirmed no custom
+  implementation of this interface exists anywhere in `apps/server` today (only
+  `NoopAuthEventPublisher`), and that `libs/auth` — unlike `libs/workflow` — has no separate
+  `package.json`, so it isn't a semver-sensitive external package a required-method addition could
+  break. Kept the interface uniform (all four prior methods were already required) rather than
+  introducing `libs/workflow`'s optional-method precedent (`compensationFailed?`,
+  `sweepPendingEffectsReplayed?`) without a reason specific to this interface.
+- Both "request" endpoints (`password-reset/request`, `email-verification/request`) always
+  respond `204` regardless of whether the email exists or is already verified — the services
+  themselves silently no-op rather than the controller swallowing an error, so there's no
+  code path that could accidentally leak account existence/state through a differently-timed
+  error response.
+
+## Rejected Alternatives
+
+- **Track-only email verification** (no login gate) — offered explicitly to the user as the
+  lower-risk option; not chosen (see HIGH #1).
+- **Two separate token tables** (`password_reset_tokens`, `email_verification_tokens`) — rejected
+  as pure schema duplication; see HIGH #2.
+- **A dedicated "email sender" port** distinct from `AUTH_EVENT_PUBLISHER` — rejected; the raw
+  token is carried inside the existing event payload instead, since sending the email is exactly
+  the same "cross-cutting concern the host app supplies a real implementation for" shape every
+  other `AuthEventPublisher` method already has. Inventing a second, parallel port for the same
+  concern would fragment the one extension point Design 001 already established.
+
+## CQRS / Event Sourcing Decisions
+
+Unchanged from Design 001 (not applicable).
+
+## Open Questions / Future Evolution
+
+- None new. This closes the specific item Design 001 flagged and deferred (see Design 001's Open
+  Questions, now marked resolved).
+
+## Handoff to Improvement Loop
+
+- **Public API surface (revised):** `libs/auth/src/index.ts` now also exports
+  `PasswordResetService`, `EmailVerificationService`, `AuthTokenEntity`/`AuthTokenPurpose`/
+  `AuthTokenRepository`, the four new DTOs (`RequestPasswordResetDto`, `ConfirmPasswordResetDto`,
+  `RequestEmailVerificationDto`, `ConfirmEmailVerificationDto`), and the three new error classes
+  (`PasswordResetTokenInvalidError`, `EmailVerificationTokenInvalidError`,
+  `EmailNotVerifiedError`).
+- **Module boundaries:** unchanged — no new external dependency introduced (see HIGH #2).
+
+---
+
+# Design 004
+
+**Library / Bounded Context:** libs/auth
+**Date:** 2026-07-22
+
+## Goal
+
+Record the new `@/ratelimit` dependency taken on directly by `libs/auth` when
+`libs/ratelimit`'s ARCH.md Design 002 applied `@RateLimit('login')` to `AuthController.login` —
+this file's own module-boundary record needs to reflect that, not just `libs/ratelimit`'s.
+
+## Key Decisions (with risk tag)
+
+**MEDIUM**
+- `libs/auth` imports `@RateLimit()`/`RATE_LIMIT_METADATA` from `@/ratelimit` — metadata-only
+  (`SetMetadata`), no service call or constructor injection, materially lighter than the existing
+  `@/database`/`@/validation` dependencies. See `libs/ratelimit/ARCH.md` Design 002 for the full
+  reasoning (including why this was applied inside `libs/auth` rather than at the `apps/server`
+  layer).
+
+## Handoff to Improvement Loop
+
+- **Module boundaries (revised):** `libs/auth` → `@/ratelimit` (decorator metadata only), in
+  addition to the already-established `@/database`/`@/validation` dependencies.
+
+---
+
+# Design 005
+
+**Library / Bounded Context:** libs/auth
+**Date:** 2026-07-22
+
+## Goal
+
+Add a per-user concurrent device/session cap. Direct user request ("device limit?"), scoped via
+two clarifying questions before implementing (eviction vs. rejection on exceeding the cap; default
+value and configurability).
+
+## Key Decisions (with risk tag)
+
+**MEDIUM**
+- **Evict oldest, don't reject the new login.** Confirmed directly with the user (offered as the
+  recommended option): a 6th concurrent login always succeeds; the least-recently-issued active
+  refresh token is silently revoked to make room. Matches common consumer-app behavior ("you've
+  been logged out on your other device") rather than a stricter enterprise/security-tool denial.
+- **Default 5, configurable via `AuthModuleOptions.maxActiveSessionsPerUser`** — confirmed
+  directly with the user, same override shape as `refreshTokenTtlSeconds`.
+- **"Active" excludes naturally-expired-but-not-yet-revoked rows**, not just explicitly-revoked
+  ones (`RefreshTokenRepository.findActiveForUser` filters `expiresAt > now`) — otherwise stale
+  rows nobody ever explicitly revoked would count against the cap forever, eventually evicting
+  genuinely active sessions for accounts with old dead tokens sitting in the table.
+- **Enforcement lives inside `RefreshTokenService.issue`, not `AuthService.login`.** `issue()` is
+  the one place both `login()` (a fresh session) and `rotate()` (continuing an existing session)
+  ultimately go through — since `rotate()` already revokes the old row for its family before
+  calling `issue()` again, the active count never actually grows during rotation, so enforcement
+  naturally only bites on a genuinely new login (or an account already over a newly-lowered cap).
+  No special-casing needed between the two call paths.
+
+## Rejected Alternatives
+
+- **Reject the new login instead of evicting** — offered explicitly to the user as the stricter
+  alternative; not chosen (see MEDIUM above).
+- **Enforcing the cap in `AuthService.login`** — rejected in favor of `RefreshTokenService.issue`,
+  since the latter is the single choke point both `login()` and `rotate()` already share; putting
+  it in `login()` would miss the (admittedly rare) case of an account already over a newly-lowered
+  cap being trimmed down on its next token rotation rather than only on fresh logins.
+
+## Handoff to Improvement Loop
+
+- **Public API surface (revised):** `AuthModuleOptions.maxActiveSessionsPerUser?: number`;
+  `RefreshTokenRepository` gained `findActiveForUser`/`revokeMany`.
+- **Module boundaries:** unchanged.
+
+---
+
+# Design 006
+
+**Library / Bounded Context:** libs/auth (Identity & Access)
+**Date:** 2026-07-23
+
+## Goal
+
+Correct a factual drift Design 001's "Workflows / Sagas" section introduced: it claimed every use
+case in this library runs inside `@Transactional()` (`REQUIRED` propagation) from `@/database`.
+`LOOP.md` Loop 018 found this was never true — `@Transactional()` had zero consumers anywhere in
+`libs/auth`, or in fact anywhere in this entire monorepo, before that loop attempted (and then
+reverted) using it. This entry doesn't change any design decision; it corrects the record to match
+what the code has always actually done, per this protocol's own rule that `ARCH.md` should reflect
+implementation reality (or document an intentional divergence) rather than aspirational intent
+nobody circled back to verify.
+
+## What Actually Happens (correcting Design 001's "Workflows / Sagas" claim)
+
+- No code path in `libs/auth` uses `@Transactional()`. Most use cases are a single call into one
+  repository method (`save()`/`insert()`/`update()`), which is already atomic on its own — no
+  explicit transaction wrapper needed for a single write.
+- Multi-write flows (e.g. `AuthService.register()`: check uniqueness, hash password, save the
+  user, issue an email-verification token, publish an event) are **not** wrapped in one database
+  transaction today. This has been true since Design 001's original implementation; it was never
+  actually built the way that section described.
+- The one place a real concurrency hazard existed — `AuthorizationService`'s RBAC
+  grant/revoke methods racing on a shared many-to-many array (Loop 018) — was fixed **without**
+  transactions at all: `UserRepository.addRole`/`removeRole` and `RoleRepository.addPermission`/
+  `removePermission` write a single row directly to the join table via TypeORM's relation query
+  builder, which is atomic at the database level on its own. Loop 018 tried `@Transactional()` +
+  pessimistic row locking first and reverted it — see that loop's entry for why (the decorator
+  requires a real Nest DI bootstrap to take effect at all, and `better-sqlite3`, which every
+  integration test in this repo depends on, can't execute `SELECT ... FOR UPDATE` regardless).
+
+## Key Decisions (with risk tag)
+
+**LOW**
+- Documentation-only correction — no code, schema, or public API change. Classified LOW per
+  ci.loop §18 (the equivalent of "folder naming" for a design decision: this doesn't move a
+  bounded-context or aggregate boundary, it just makes the written record match what already
+  existed).
+
+## Rejected Alternatives
+
+- Silently leaving Design 001's claim uncorrected — rejected because a future loop or reader
+  relying on "`@Transactional()` protects every use case" as a design invariant would be reasoning
+  from a false premise, exactly the kind of drift ci.loop's Phase 2 review checklist calls out
+  ("has an aggregate boundary been violated... has an event contract changed shape without
+  updating the design log").
+
+## CQRS Decision
+
+Not applicable — unchanged from Design 001.
+
+## Event Sourcing Decision
+
+Not applicable — unchanged from Design 001.
+
+## Open Questions / Future Evolution
+
+- If a future concrete need arises for true multi-write atomicity (e.g. `register()`'s user-save
+  and verification-token-insert needing to succeed or fail together), revisit then — no such need
+  has surfaced as of this entry, and per ci.loop §17, adding transaction wrapping without a
+  concrete driving requirement would be speculative.
+
+## Handoff to Improvement Loop
+
+- **Public API surface:** unchanged.
+- **Module boundaries:** unchanged.
+
+---
+
+# Design 007
+
+**Library / Bounded Context:** libs/auth
+**Date:** 2026-07-23
+
+## Goal
+
+Record the new `@/audit` dependency taken on by `AuthorizationService` when `libs/audit/ARCH.md`
+Design 001 wired RBAC mutations (create/delete role & permission, grant/revoke, assign/revoke role)
+into the new Audit Module — this file's own module-boundary record needs to reflect that, not just
+`libs/audit`'s.
+
+## Key Decisions (with risk tag)
+
+**MEDIUM**
+- `AuthorizationService` now constructor-injects `AuditService` and calls `.record(...)` at the end
+  of each of its 8 mutation methods. Each method also gained an optional trailing `actorId?: string`
+  parameter (additive, not a breaking signature change) so the audit entry can capture who performed
+  the action; `RoleController` now forwards `@CurrentUser().userId` as that argument on every route.
+  See `libs/audit/ARCH.md` Design 001 for the full reasoning (direct-service-call mechanism, no
+  cycle since `libs/audit` takes no dependency back on `libs/auth`).
+
+## Handoff to Improvement Loop
+
+- **Public API surface (revised):** `AuthorizationService`'s 8 mutation methods each gained an
+  optional trailing `actorId?: string` parameter. No other public API change.
+- **Module boundaries (revised):** `libs/auth` → `@/audit` (direct dependency on `AuditService`), in
+  addition to the already-established `@/database`/`@/validation`/`@/ratelimit` dependencies.
+
+---
+
+# Design 008
+
+**Library / Bounded Context:** libs/auth
+**Date:** 2026-07-23
+
+## Goal
+
+Record that `AUTH_EVENT_PUBLISHER` now has a real (non-no-op) implementation for the first time —
+`apps/server`'s new `QueueAuthEventPublisher` (see `libs/notification/ARCH.md` Design 001) — closing
+the exact gap Design 001's Open Questions flagged ("the host can wire this to `RMQPublisher` later
+to drive a notification/email consumer — today nothing consumes these events").
+
+## Key Decisions (with risk tag)
+
+**LOW**
+- No change to `libs/auth` itself — `AuthEventPublisher`'s interface, `NoopAuthEventPublisher`, and
+  every call site were already built exactly to support this (Design 001's own stated intent).
+  This entry exists only to mark the "today nothing consumes these events" caveat as resolved and
+  to record which two of the six events (`PasswordResetRequestedEvent`/
+  `EmailVerificationRequestedEvent`) gained a real consumer; the other four remain no-op by design
+  (see `libs/notification/ARCH.md` Open Questions) — not a partial/broken implementation, a
+  deliberately scoped one.
+
+## Handoff to Improvement Loop
+
+- **Public API surface / Module boundaries:** unchanged — the new publisher lives in `apps/server`,
+  not in `libs/auth`.

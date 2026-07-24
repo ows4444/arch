@@ -12,6 +12,8 @@ import { AuthService } from './application/auth.service';
 import { AuthorizationService } from './application/authorization.service';
 import { TokenService } from './application/token.service';
 import { RefreshTokenService } from './application/refresh-token.service';
+import { PasswordResetService } from './application/password-reset.service';
+import { EmailVerificationService } from './application/email-verification.service';
 import { Argon2PasswordHasher } from './adapters/argon2-password-hasher';
 import { NoopAccessTokenDenylist } from './adapters/noop-access-token-denylist';
 import { NoopAuthEventPublisher } from './adapters/noop-auth-event-publisher';
@@ -25,6 +27,8 @@ const CORE_EXPORTS = [
   AuthService,
   AuthorizationService,
   TokenService,
+  PasswordResetService,
+  EmailVerificationService,
   JwtAuthGuard,
   PermissionsGuard,
   RolesGuard,
@@ -121,6 +125,8 @@ export class AuthModule {
     return [
       TokenService,
       RefreshTokenService,
+      EmailVerificationService,
+      PasswordResetService,
       AuthService,
       AuthorizationService,
       JwtAuthGuard,

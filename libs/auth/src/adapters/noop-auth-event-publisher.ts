@@ -18,4 +18,12 @@ export class NoopAuthEventPublisher implements AuthEventPublisher {
   publishRefreshTokenReuseDetected(): Promise<void> {
     return Promise.resolve();
   }
+
+  publishPasswordResetRequested(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  publishEmailVerificationRequested(): Promise<void> {
+    return Promise.resolve();
+  }
 }

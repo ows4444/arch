@@ -5,6 +5,7 @@ import { RefreshTokenRepository } from '../domain/refresh-token.repository';
 import {
   AUTH_EVENT_PUBLISHER,
   AUTH_MODULE_OPTIONS,
+  DEFAULT_MAX_ACTIVE_SESSIONS_PER_USER,
   DEFAULT_REFRESH_TOKEN_TTL_SECONDS,
 } from '../auth.constants';
 import type { AuthEventPublisher } from '../ports/auth-event-publisher.interface';
@@ -15,6 +16,8 @@ export interface RefreshTokenMetadata {
   createdByIp?: string;
 
   userAgent?: string;
+
+  deviceId?: string;
 }
 
 export interface IssuedRefreshToken {
@@ -33,6 +36,8 @@ export interface RotatedRefreshToken {
 export class RefreshTokenService {
   private readonly ttlSeconds: number;
 
+  private readonly maxActiveSessions: number;
+
   constructor(
     @InjectRepository(RefreshTokenRepository)
     private readonly refreshTokens: RefreshTokenRepository,
@@ -42,6 +47,8 @@ export class RefreshTokenService {
   ) {
     this.ttlSeconds =
       options.refreshTokenTtlSeconds ?? DEFAULT_REFRESH_TOKEN_TTL_SECONDS;
+    this.maxActiveSessions =
+      options.maxActiveSessionsPerUser ?? DEFAULT_MAX_ACTIVE_SESSIONS_PER_USER;
   }
 
   async issue(
@@ -59,10 +66,34 @@ export class RefreshTokenService {
       expiresAt,
       createdByIp: metadata.createdByIp ?? null,
       userAgent: metadata.userAgent ?? null,
+      deviceId: metadata.deviceId ?? null,
       createdAt: new Date(),
     });
 
+    await this.enforceSessionLimit(userId);
+
     return { token, expiresAt };
+  }
+
+  /**
+   * Caps concurrent active sessions/devices per user at `maxActiveSessions`
+   * — evicts the least-recently-issued active session(s) rather than
+   * rejecting the new login (see `AuthModuleOptions.maxActiveSessionsPerUser`).
+   * A no-op during token *rotation* (as opposed to a fresh `login()`):
+   * `rotate()` already revokes the old row for that family before calling
+   * `issue()` again, so the active count never actually grows on rotation —
+   * only a genuinely new login (or a user already over the cap from before
+   * this limit existed/changed) ever triggers an eviction here.
+   */
+  private async enforceSessionLimit(userId: string): Promise<void> {
+    const active = await this.refreshTokens.findActiveForUser(userId);
+    const excess = active.length - this.maxActiveSessions;
+
+    if (excess > 0) {
+      await this.refreshTokens.revokeMany(
+        active.slice(0, excess).map((token) => token.id),
+      );
+    }
   }
 
   /**

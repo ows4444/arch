@@ -16,6 +16,8 @@ export * from './application/auth.service';
 export * from './application/authorization.service';
 export * from './application/token.service';
 export * from './application/refresh-token.service';
+export * from './application/password-reset.service';
+export * from './application/email-verification.service';
 
 /*
  * Ports
@@ -63,6 +65,11 @@ export * from './dto/create-role.dto';
 export * from './dto/create-permission.dto';
 export * from './dto/role-response.dto';
 export * from './dto/permission-response.dto';
+export * from './dto/request-password-reset.dto';
+export * from './dto/confirm-password-reset.dto';
+export * from './dto/request-email-verification.dto';
+export * from './dto/confirm-email-verification.dto';
+export * from './dto/change-password.dto';
 
 /*
  * Domain
@@ -71,11 +78,14 @@ export * from './domain/user.entity';
 export * from './domain/role.entity';
 export * from './domain/permission.entity';
 export * from './domain/refresh-token.entity';
+export * from './domain/auth-token.entity';
+export * from './domain/auth-token-purpose.enum';
 export * from './domain/user-status.enum';
 export * from './domain/user.repository';
 export * from './domain/role.repository';
 export * from './domain/permission.repository';
 export * from './domain/refresh-token.repository';
+export * from './domain/auth-token.repository';
 
 /*
  * Errors
@@ -91,6 +101,9 @@ export * from './errors/permission-already-exists.error';
 export * from './errors/permission-not-found.error';
 export * from './errors/role-not-found.error';
 export * from './errors/user-not-found.error';
+export * from './errors/password-reset-token-invalid.error';
+export * from './errors/email-verification-token-invalid.error';
+export * from './errors/email-not-verified.error';
 
 /*
  * Config

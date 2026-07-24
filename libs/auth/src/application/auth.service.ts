@@ -8,6 +8,7 @@ import {
   RefreshTokenService,
   type RefreshTokenMetadata,
 } from './refresh-token.service';
+import { EmailVerificationService } from './email-verification.service';
 import {
   ACCESS_TOKEN_DENYLIST,
   AUTH_EVENT_PUBLISHER,
@@ -18,7 +19,9 @@ import type { AuthEventPublisher } from '../ports/auth-event-publisher.interface
 import type { AccessTokenDenylist } from '../ports/access-token-denylist.interface';
 import { InvalidCredentialsError } from '../errors/invalid-credentials.error';
 import { AccountDisabledError } from '../errors/account-disabled.error';
+import { EmailNotVerifiedError } from '../errors/email-not-verified.error';
 import { EmailAlreadyRegisteredError } from '../errors/email-already-registered.error';
+import { UserNotFoundError } from '../errors/user-not-found.error';
 import type { RegisterDto } from '../dto/register.dto';
 import type { LoginDto } from '../dto/login.dto';
 import { UniqueEmailSpecification } from '../specifications/unique-email.specification';
@@ -42,6 +45,7 @@ export class AuthService {
     private readonly users: UserRepository,
     private readonly tokens: TokenService,
     private readonly refreshTokens: RefreshTokenService,
+    private readonly emailVerification: EmailVerificationService,
     @Inject(PASSWORD_HASHER)
     private readonly passwordHasher: PasswordHasher,
     @Inject(AUTH_EVENT_PUBLISHER)
@@ -64,8 +68,10 @@ export class AuthService {
       email,
       passwordHash,
       passwordAlgo: this.passwordHasher.algo,
-      status: UserStatus.ACTIVE,
+      status: UserStatus.UNVERIFIED,
     });
+
+    await this.emailVerification.issue(user.id, user.email);
 
     await this.events.publishUserRegistered({
       userId: user.id,
@@ -92,6 +98,10 @@ export class AuthService {
 
     if (!valid) {
       throw new InvalidCredentialsError();
+    }
+
+    if (user.status === UserStatus.UNVERIFIED) {
+      throw new EmailNotVerifiedError();
     }
 
     if (user.status !== UserStatus.ACTIVE) {
@@ -144,6 +154,46 @@ export class AuthService {
 
   async logoutAll(userId: string): Promise<void> {
     await this.refreshTokens.revokeAllForUser(userId);
+  }
+
+  /**
+   * For an already-authenticated user who knows their current password —
+   * distinct from `PasswordResetService.confirmReset`'s anonymous,
+   * token-based flow. Revokes every refresh token on success, same
+   * reasoning `logoutAll`/`PasswordResetService.confirmReset` already
+   * apply: changing the password is exactly the moment every other
+   * session should be forced to re-authenticate.
+   */
+  async changePassword(
+    userId: string,
+    currentPassword: string,
+    newPassword: string,
+  ): Promise<void> {
+    const user = await this.users.findById(userId);
+
+    if (!user) {
+      throw new UserNotFoundError(userId);
+    }
+
+    const valid = await this.passwordHasher.verify(
+      user.passwordHash,
+      currentPassword,
+    );
+
+    if (!valid) {
+      throw new InvalidCredentialsError();
+    }
+
+    const passwordHash = await this.passwordHasher.hash(newPassword);
+
+    await this.users.save({
+      id: user.id,
+      passwordHash,
+      passwordAlgo: this.passwordHasher.algo,
+    });
+
+    await this.refreshTokens.revokeAllForUser(user.id);
+    await this.events.publishPasswordChanged({ userId: user.id });
   }
 
   private async issueSession(

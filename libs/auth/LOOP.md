@@ -1124,3 +1124,835 @@ PASS (`npm run lint`, auto-fixed formatting only)
 - None forced. If a future loop revisits `apps/server`, confirm/close the stale "no shutdown
   hooks/CORS/Helmet" TODO line noted above — it appears to already be resolved outside this
   library's scope.
+
+---
+
+# Loop 013
+
+**Library:** libs/auth
+**Date:** 2026-07-22
+
+## Goal
+
+Close two product-scope gaps carried since Loop 008: no endpoint to delete a role/permission, and
+no endpoint to list a single user's roles. Direct user request.
+
+## Files Reviewed
+
+- `application/authorization.service.ts`
+- `http/role.controller.ts`
+- `persistence/migrations/1753000000000-InitialAuthSchema.migration.ts` (confirmed
+  `auth_role_permissions`/`auth_user_roles`'s foreign keys already declare `onDelete: 'CASCADE'`
+  on `roleId`/`permissionId` — a deliberate schema choice already in place, not something this
+  loop needed to add)
+- `domain/role.repository.ts`, `domain/permission.repository.ts`, `libs/database`'s
+  `BaseRepository.delete` (confirmed the generic `delete(where)` method already exists — no new
+  repository method needed)
+
+## Problems Found
+
+**Medium**
+- (the two gaps named above — product-scope omissions, not defects; closing per direct request)
+
+## Changes Made
+
+- `authorization.service.ts`: added `listUserRoles(userId)` (throws `UserNotFoundError` if the
+  user doesn't exist, otherwise returns `user.roles`), `deleteRole(roleName)` and
+  `deletePermission(permissionName)` (both throw their existing `*NotFoundError` if the target
+  doesn't exist, otherwise delegate to `BaseRepository.delete({ id })`).
+- `role.controller.ts`: three new routes — `DELETE /auth/roles/:roleName`,
+  `DELETE /auth/permissions/:permissionName`, `GET /auth/users/:userId/roles` — all gated behind
+  the same `roles:manage` permission as every other route in this controller. The two delete
+  routes' Swagger descriptions call out the cascade behavior explicitly (see Why).
+- Added tests: 6 new `AuthorizationService` tests (`listUserRoles` happy path + not-found,
+  `deleteRole` happy path + not-found, `deletePermission` happy path + not-found) and 3 new
+  `RoleController` delegation tests.
+
+## Why
+
+- Deletion relies on the join tables' pre-existing `onDelete: 'CASCADE'` rather than adding an
+  "in use" guard: the schema was already deliberately built to allow cascading cleanup on delete
+  (confirmed in the original migration, not something added this loop), so blocking deletion while
+  a role/permission is still assigned would fight an existing, intentional design decision rather
+  than respect it. Documented the cascade behavior in each endpoint's Swagger description so it's
+  not a silent surprise to API consumers (deleting a role in active use does revoke it from every
+  holder, immediately).
+- `deletePermission`'s not-found response stays 400 (`PermissionNotFoundError`, matching
+  `grantPermission`/`revokePermission`'s existing convention for this exact error) rather than 404,
+  for consistency with the sibling permission-reference endpoints already in this controller —
+  `RoleNotFoundError` (404) and `UserNotFoundError` were left as their existing status codes.
+- No new repository method was needed — `BaseRepository.delete(where)` already covers this; the fix
+  is purely at the service/controller layer.
+
+## Tests
+
+`libs/auth` suite: 17 suites / 104 tests (up from 95). Full monorepo suite: 135 suites / 1069
+tests, all passing.
+
+## Build
+
+PASS (`npm run typecheck`; also explicitly verified `npx nest build server` and
+`npx nest build worker` both compile clean)
+
+## Lint
+
+PASS (`npm run lint`)
+
+## Remaining TODO
+
+- Password reset / email verification still unbuilt (unchanged — a larger feature, not attempted
+  this loop).
+
+## Next Loop
+
+- No Critical/High findings remain open. This closes the role/permission-delete and
+  list-user-roles gaps named since Loop 008 — next loop would be password reset/email
+  verification (if prioritized) or a fresh Phase 1/2 pass if none of that is in scope yet.
+
+---
+
+# Loop 014
+
+**Library:** libs/auth
+**Date:** 2026-07-22
+
+## Goal
+
+Build password reset and email verification — the last product-scope gap named since Loop 008.
+Direct user request.
+
+## Files Reviewed
+
+- `domain/user.entity.ts` — confirmed `emailVerifiedAt`/`UserStatus.UNVERIFIED` already existed in
+  the domain model but were never wired to anything (`register()` set every user `ACTIVE`
+  immediately).
+- `application/refresh-token.service.ts` / `domain/refresh-token.{entity,repository}.ts` — the
+  hashed-single-use-token pattern (raw token to the caller, sha256 hash persisted, atomic
+  compare-and-consume) this loop's new tokens reuse directly.
+- `ports/auth-event-publisher.interface.ts` / `adapters/noop-auth-event-publisher.ts` — the
+  existing "cross-cutting DI token with a no-op default" pattern; confirmed no custom
+  `AuthEventPublisher` implementation exists anywhere in `apps/server` today (only the no-op), and
+  that `libs/auth` (unlike `libs/workflow`) has no separate `package.json` — it isn't a
+  semver-sensitive external package, so adding required interface methods here doesn't risk
+  breaking an external consumer the way it would for `libs/workflow`'s `WorkflowMetrics`.
+- `persistence/migrations/1753000000000-InitialAuthSchema.migration.ts` — confirmed
+  `auth_refresh_tokens.userId` has no FK constraint (just an indexed column), the pattern the new
+  `auth_tokens` table follows.
+- `application/auth.service.ts`, `http/auth.controller.ts`, `auth.module.ts` — the existing
+  register/login/DTO/module-wiring conventions this loop's additions had to slot into.
+
+## Problems Found
+
+**Medium**
+- (the gap named above — a product-scope omission, not a defect; the domain model had already
+  anticipated it)
+
+## Changes Made
+
+- **New `auth_tokens` table** (`domain/auth-token.entity.ts`,
+  `domain/auth-token-purpose.enum.ts`, `domain/auth-token.repository.ts`, migration
+  `1753200000000-AuthTokens`): one table backs both password reset and email verification (a
+  `purpose` column distinguishes them) rather than duplicating an identical schema twice — see the
+  entity's own doc comment for why. `AuthTokenRepository` mirrors `RefreshTokenRepository`'s
+  `findActiveByHash`/atomic `markUsedIfActive`/`invalidateActiveForUser` shape.
+- **`EmailVerificationService`** (new): `issue(userId, email)` (invalidate-then-issue-then-publish,
+  shared by both registration and resend), `requestVerification(email)` (silent no-op for unknown
+  email or a user that isn't currently `UNVERIFIED`), `confirm(rawToken)` (activates the user,
+  stamps `emailVerifiedAt`).
+- **`PasswordResetService`** (new): `requestReset(email)` (silent no-op for unknown email — never
+  reveals account existence), `confirmReset(rawToken, newPassword)` (rehashes the password,
+  consumes the token, **revokes every existing refresh token for the user** — a password reset is
+  exactly the moment a possibly-compromised session should be forced to re-authenticate, same
+  reasoning `AuthService.logoutAll` already exists for — and publishes the existing
+  `PasswordChangedEvent`).
+- **`AuthService.register()`**: now persists `status: UserStatus.UNVERIFIED` (was `ACTIVE`) and
+  calls `emailVerification.issue(user.id, user.email)` right after creating the user.
+- **`AuthService.login()`**: now throws the new `EmailNotVerifiedError` for `UNVERIFIED` status,
+  checked before the existing `AccountDisabledError` check (kept distinct from "disabled" — a
+  different, actionable condition).
+- **`AuthEventPublisher`**: two new required methods, `publishPasswordResetRequested`/
+  `publishEmailVerificationRequested` — both carry the *raw* token (not the hash), since libs/auth
+  has no email-sending capability of its own; the host app's real publisher is what actually
+  emails the link, using the raw token, before it's ever persisted only as a hash.
+  `NoopAuthEventPublisher` implements both as no-ops.
+- **Four new `AuthController` routes** (all `@Public()`, always `204` regardless of outcome for
+  the two "request" endpoints so the response never leaks account existence/state):
+  `POST /auth/password-reset/request`, `POST /auth/password-reset/confirm`,
+  `POST /auth/email-verification/request`, `POST /auth/email-verification/confirm`.
+- New DTOs (`RequestPasswordResetDto`, `ConfirmPasswordResetDto`,
+  `RequestEmailVerificationDto`, `ConfirmEmailVerificationDto`) and new errors
+  (`PasswordResetTokenInvalidError`, `EmailVerificationTokenInvalidError`,
+  `EmailNotVerifiedError`), following this library's existing DTO/error conventions.
+- `auth.constants.ts`/`auth.types.ts`: `DEFAULT_PASSWORD_RESET_TOKEN_TTL_SECONDS` (1 hour),
+  `DEFAULT_EMAIL_VERIFICATION_TOKEN_TTL_SECONDS` (24 hours), both overridable via
+  `AuthModuleOptions`.
+- `auth.module.ts`: registered both new services as providers/exports.
+- Updated existing tests across `auth.service.spec.ts`, `refresh-token.service.spec.ts`,
+  `auth.controller.spec.ts`, and `auth.integration.spec.ts` (added an `activate()` helper so
+  tests unrelated to verification can bypass it) to account for the new constructor params and
+  the `UNVERIFIED`-by-default registration behavior. Added dedicated unit spec files for both new
+  services plus 5 new real-`DataSource` integration tests (full verify-then-login flow, rejecting
+  an already-used verification token, full reset-then-relogin-then-old-sessions-revoked flow,
+  rejecting an invalid reset token without touching the password, silent no-op on an unknown
+  reset email).
+
+## Why
+
+- **Block login until verified** (rather than track-only) per direct user confirmation —
+  `UserStatus.UNVERIFIED` was clearly built for this and had simply never been wired up; leaving
+  it purely informational would have left the existing domain model's intent unfulfilled for no
+  stated reason.
+- **One `auth_tokens` table instead of two** — password-reset and email-verification tokens are
+  structurally identical (single-use, hashed, expiring, scoped to a user); duplicating the schema
+  would violate Section 17's "shared utilities only when justified" in the direction of *not*
+  sharing something that genuinely warrants it, unlike the `retry-child`/`ignore` case in
+  `libs/workflow` where forcing a shared abstraction was explicitly rejected for good reason.
+- **Raw token carried in the published event, not looked up separately** — libs/auth has no
+  email-sending capability and was never going to grow one in this loop (that's an app-level
+  concern); the existing "DI token + no-op default, host supplies the real implementation" pattern
+  already used for `AuthEventPublisher` was the natural fit, so this loop extended that interface
+  rather than inventing a parallel "email sender" port.
+- **Password reset revokes every session** — matches the security reasoning already established
+  for `logoutAll`; leaving old sessions alive after a reset would undermine the point of resetting
+  a possibly-compromised password.
+- **Required (not optional) new `AuthEventPublisher` methods** — confirmed `libs/auth` has no
+  separate `package.json` (unlike `libs/workflow`), so it isn't a semver-sensitive external
+  package; no host code currently implements this interface directly (only the no-op), so a
+  required-method addition is safe within this repo and keeps the interface uniform (no
+  precedent here yet for a mixed required/optional interface, unlike `libs/workflow`'s
+  `WorkflowMetrics`).
+
+## Tests
+
+`libs/auth` suite: 19 spec files / 128 tests (up from 104). Full monorepo suite: 137 suites / 1093
+tests, all passing.
+
+## Build
+
+PASS (`npm run typecheck`; also explicitly verified `npx nest build server` and
+`npx nest build worker` both compile clean)
+
+## Lint
+
+PASS (`npm run lint`)
+
+## Remaining TODO
+
+- None outstanding for this library. This was the last named product-scope gap from Loop 008.
+
+## Next Loop
+
+- No Critical/High findings remain open, and no further product-scope gaps are currently named.
+  Next loop would be a fresh Phase 1/2 adversarial pass (per this library's own history of
+  periodic re-review, e.g. Loop 012), or driven by whatever concrete need surfaces next.
+
+---
+
+# Loop 015
+
+**Library:** libs/auth
+**Date:** 2026-07-22
+
+## Goal
+
+Add a change-password endpoint for an already-authenticated user — distinct from the anonymous,
+email-token-based `PasswordResetService` flow built in Loop 014. Direct user request, following up
+on an exploratory "what's missing" question that also flagged login brute-force protection as a
+bigger, separate design decision not attempted here.
+
+## Files Reviewed
+
+- `application/auth.service.ts`, `application/password-reset.service.ts` (confirmed no existing
+  "change password while logged in" path — `PasswordResetService.confirmReset` requires an
+  emailed token, not a known current password)
+- `http/auth.controller.ts` (existing `@CurrentUser()`/`JwtAuthGuard` pattern used by
+  `logout`/`logoutAll`/`me`)
+
+## Problems Found
+
+**Low**
+- (the gap named above — a product-scope omission, not a defect)
+
+## Changes Made
+
+- `AuthService.changePassword(userId, currentPassword, newPassword)`: verifies the current
+  password, rehashes, saves, revokes every refresh token for the user, and publishes the existing
+  `PasswordChangedEvent` — same revoke-everything reasoning already applied to
+  `PasswordResetService.confirmReset`/`logoutAll`.
+- `ChangePasswordDto` (new).
+- `AuthController.changePassword`: `POST /auth/change-password`, `@UseGuards(JwtAuthGuard)`,
+  takes the current user's id from `@CurrentUser()` rather than the request body (a user can only
+  change their own password through this endpoint).
+- Tests: 2 new `AuthService` unit tests, 1 new controller delegation test, 2 new real-`DataSource`
+  integration tests (full change-then-relogin-then-old-sessions-revoked flow; wrong-current-
+  password rejected without touching anything).
+
+## Why
+
+Distinct endpoint rather than reusing `PasswordResetService.confirmReset` because the two flows
+authenticate the caller differently (a known current password vs. a possession-of-email proof via
+token) and serve different UX moments (settings-page password change vs. "I forgot my password").
+Forcing them through one method would mean threading an `isAuthenticatedFlow` branch through
+`confirmReset`'s token-lookup logic for no shared benefit — same reasoning already applied
+elsewhere in this library (Design 002's rejected-alternatives note) against forcing a shared
+abstraction where the two paths don't actually share meaningful logic beyond "hash and save."
+
+## Tests
+
+`libs/auth` suite: 19 spec files / 133 tests (up from 128). Full monorepo suite: 137 suites / 1098
+tests, all passing.
+
+## Build
+
+PASS (`npm run typecheck`; also explicitly verified `npx nest build server` and
+`npx nest build worker` both compile clean)
+
+## Lint
+
+PASS (`npm run lint`)
+
+## Remaining TODO
+
+- Login brute-force protection (rate limiting / account lockout) — flagged during the same
+  conversation as a bigger, separate design decision (lockout vs. rate-limit vs. CAPTCHA, plus a
+  choice of attempt-count store) not attempted this loop.
+
+## Next Loop
+
+- No Critical/High findings remain open. Login brute-force protection above is the next
+  candidate if prioritized — needs a design decision first, not a straight implementation.
+
+---
+
+# Loop 016
+
+**Library:** libs/auth
+**Date:** 2026-07-22
+
+## Goal
+
+Add a per-user concurrent device/session limit. Direct user request ("device limit?"). See
+`ARCH.md` Design 005 for the two scoping decisions confirmed before implementing.
+
+## Files Reviewed
+
+- `application/refresh-token.service.ts` (`issue`/`rotate` — confirmed `rotate()` already revokes
+  the old row for its family before calling `issue()` again, meaning the active-session count
+  never actually grows during rotation, only on a genuinely new `login()`)
+- `domain/refresh-token.repository.ts` (existing `revokeIfActive`/`revokeFamily`/`revokeAllForUser`
+  shape the two new methods follow)
+
+## Problems Found
+
+**Medium**
+- Confirmed the gap: no cap existed on concurrent active refresh tokens per user — a single
+  account could log into unlimited devices simultaneously with no eviction or rejection.
+
+## Changes Made
+
+- `auth.constants.ts`: `DEFAULT_MAX_ACTIVE_SESSIONS_PER_USER = 5`.
+- `auth.types.ts`: `AuthModuleOptions.maxActiveSessionsPerUser?: number`.
+- `domain/refresh-token.repository.ts`: `findActiveForUser(userId, now?)` (not revoked, not
+  expired, oldest-first) and `revokeMany(ids)`.
+- `application/refresh-token.service.ts`: `issue()` now calls a new private
+  `enforceSessionLimit(userId)` after saving the new token — loads active sessions, and if over
+  `maxActiveSessions`, revokes the oldest excess via `revokeMany`.
+- Tests: 3 new `RefreshTokenService` unit tests (within-limit no-op, eviction on exceeding the
+  default, respecting a configured override) plus 2 existing tests updated for the new repository
+  methods; 1 new real-`DataSource` integration test (register → 5 logins → a 6th succeeds and
+  evicts the oldest, the other 4 original sessions plus the new one remain usable).
+
+## Why
+
+See `ARCH.md` Design 005.
+
+## Tests
+
+`libs/auth` suite: 19 spec files / 141 tests (up from 137). Full monorepo suite: 145 suites / 1168
+tests, all passing.
+
+## Build
+
+PASS (`npm run typecheck`; explicitly verified `npx nest build server` and `npx nest build worker`
+both compile clean)
+
+## Lint
+
+PASS (`npm run lint`)
+
+## Remaining TODO
+
+- None outstanding for this library.
+
+## Next Loop
+
+- No Critical/High findings remain open. `libs/auth` is at a natural stopping point again.
+
+---
+
+# Loop 017
+
+**Library:** libs/auth
+**Date:** 2026-07-23
+
+## Goal
+
+Fresh adversarial Phase 1/2 pass, prompted by the same-day discovery of a real transaction-scope
+bug in `libs/workflow` and a composite-key-collision bug found across `libs/cache`/`libs/queue`/
+`libs/ratelimit` — checking whether either bug class recurs here, plus a general re-read of the
+highest-risk security surfaces (refresh-token rotation/reuse, login, password reset, email
+verification, JWT guard, access-token denylist).
+
+## Files Reviewed
+
+- `application/refresh-token.service.ts` (`issue`/`rotate`/`enforceSessionLimit`/`revoke`),
+  `application/auth.service.ts` (`register`/`login`/`refresh`/`changePassword`),
+  `application/password-reset.service.ts`, `application/email-verification.service.ts`,
+  `application/token.service.ts`, `guards/jwt-auth.guard.ts`, `adapters/cache-access-token-denylist.ts`.
+- `persistence/migrations/1753000000000-InitialAuthSchema.migration.ts` — confirmed `auth_users.email`
+  has a DB-level `isUnique` constraint backstopping `register()`'s app-level
+  `UniqueEmailSpecification` check against the TOCTOU race two concurrent registrations could
+  otherwise hit.
+- Checked every hash-key/cache-key construction in this library (`cache-access-token-denylist.ts`'s
+  `auth:denylist:${jti}`, refresh/reset/verification tokens' plain SHA-256 hash-as-primary-key) for
+  the same naive-concatenation collision shape found in `libs/cache`/`libs/queue`/`libs/ratelimit`
+  this session — none apply here: `jti` is a `randomUUID()` (no `:`), and token lookups key off a
+  SHA-256 hash of the raw token, not a concatenation of two independent free-form values.
+
+## Problems Found
+
+**Critical / High** — none.
+
+**Low**
+- `password-reset.service.ts`'s `requestReset()` doc comment states it "never reveals whether an
+  account exists via response timing/shape," but the existing-user path does two extra DB writes
+  (`invalidateActiveForUser`, `save`) plus an event publish that the unknown-email path skips —
+  a real, if minor, timing asymmetry the comment overstates. Not fixed: `POST
+  /auth/request-password-reset` already sits behind a rate limiter (`libs/ratelimit` Loop 003),
+  which substantially caps an attacker's ability to gather enough timing samples to distinguish
+  the two paths reliably over a network. `email-verification.service.ts`'s `requestVerification`
+  has the identical shape/mitigation.
+
+## Changes Made
+
+None — no finding this pass crossed the bar for a code change. The Low finding above is a
+documentation-precision nit with an existing, adequate mitigation (rate limiting), not a gap
+worth a diff.
+
+## Why
+
+- Confirmed neither of this session's two recurring bug classes (naive composite-key
+  concatenation; an outer transaction unintentionally absorbing multiple independent commits)
+  appears in `libs/auth` — its token/session writes are all single, independent `save()`/`update()`
+  calls with no multi-step-in-one-transaction shape and no `${a}:${b}`-style key construction.
+- The timing-asymmetry Low finding was investigated seriously (is the doc comment's claim actually
+  true?) before being left as a Low/documented-mitigation item rather than manufacturing a fix for
+  a risk the existing rate limiter already substantially closes — per ci.loop §17, a fix without
+  measurable value isn't warranted here.
+
+## Tests
+
+No test changes — no code changed. `libs/auth` suite unchanged, all passing as part of the full
+monorepo run (145 suites / 1174 tests).
+
+## Build
+
+PASS (`npm run typecheck`)
+
+## Lint
+
+PASS (`npm run lint`)
+
+## Remaining TODO
+
+- Unchanged: login brute-force protection (Loop 015's carried-over item, needs a design decision).
+- The `password-reset.service.ts`/`email-verification.service.ts` doc-comment overstatement noted
+  above — cosmetic, not urgent.
+
+## Next Loop
+
+- No Critical/High/Medium findings this pass. `libs/auth` remains at a natural stopping point;
+  login brute-force protection is the only named, undecided item if a future loop wants to pick
+  it up.
+
+---
+
+# Loop 018
+
+**Library:** libs/auth
+**Date:** 2026-07-23
+
+## Goal
+
+Second adversarial pass in the same session as Loop 017, targeting `AuthorizationService`'s RBAC
+management surface (`assignRole`/`revokeRole`/`grantPermission`/`revokePermission`), which hadn't
+had a dedicated concurrency-focused review before.
+
+## Files Reviewed
+
+- `application/authorization.service.ts` — traced `assignRole`/`revokeRole`/`grantPermission`/
+  `revokePermission`'s read-modify-write shape: each loads an entity, computes a full new
+  `roles`/`permissions` array from the loaded (possibly stale) one, then `save()`s it.
+- `domain/user.entity.ts`, `domain/role.entity.ts` — confirmed `roles`/`permissions` are
+  `@ManyToMany` + `@JoinTable()` with no cascade options, meaning TypeORM's default `save()`
+  behavior for the owning side is a *full sync* of the join table against the given array (both
+  inserts and deletes), not an incremental add/remove — found a real race (below).
+- `libs/database/src/transaction/transaction-provider-enhancer.ts`,
+  `libs/database/src/module/database-core.module.ts` — confirmed `@Transactional()` only takes
+  effect via `TransactionProviderEnhancer`'s `DiscoveryService`-driven method wrapping at
+  `onModuleInit`, and that **no service in this entire monorepo had ever used `@Transactional()`
+  before this loop** — the mechanism itself was untested outside its own library's unit specs
+  (which mock `DiscoveryService` entirely).
+- `libs/queue/src/inbox/database-queue-inbox.service.ts` — the established pattern for injecting
+  `TransactionExecutor` directly and calling `.execute()`, considered as an alternative to
+  `@Transactional()`.
+- Attempted a first fix using `@Transactional()` + pessimistic row locking
+  (`findOneForUpdate`-style query builders added to `UserRepository`/`RoleRepository`); this
+  surfaced two escalating problems documented under Why, both discovered by actually running the
+  existing sqlite-backed integration suite rather than assuming the fix worked.
+
+## Problems Found
+
+**Medium**
+- `assignRole`/`revokeRole`/`grantPermission`/`revokePermission` all had a read-modify-write race:
+  two concurrent calls affecting the *same* user or role (e.g. two admins granting different roles
+  to the same user within the same window) each load the same starting array, each compute their
+  own "desired final state," and whichever `save()` (a full many-to-many sync) lands second
+  silently overwrites the first's grant — a lost update, not a privilege escalation (fails toward
+  *less* permissive), but a real data-integrity gap in the RBAC admin surface with zero existing
+  test coverage of concurrent calls.
+
+## Changes Made
+
+- **Rejected first attempt (pessimistic locking):** added `findByIdForUpdate`/`findByNameForUpdate`
+  to `UserRepository`/`RoleRepository` (`SELECT ... FOR UPDATE` via TypeORM's locked query
+  builder) and wrapped the four methods in `@Transactional()`. Running the existing integration
+  suite immediately surfaced that `@Transactional()`'s metadata-only decoration has no effect
+  unless the service is resolved through a real Nest DI bootstrap (this repo's `libs/auth`
+  integration tests construct services with plain `new`, matching every other library's fast,
+  Docker-optional integration-test convention) — switching to directly injecting
+  `TransactionExecutor` and calling `.execute()` (matching `libs/queue`'s
+  `DatabaseQueueInboxService`) fixed that, but then revealed a second, harder blocker:
+  `better-sqlite3` — the driver every integration test in this repo depends on — cannot execute
+  `SELECT ... FOR UPDATE` at all (`LockNotSupportedOnGivenDriverError`), unconditionally, not just
+  under contention. Pessimistic locking would have made these four methods permanently broken
+  against the test suite's driver, not just introduced a new capability.
+- **Actual fix (direct join-table writes):** new `is-duplicate-key-error.ts` (same shape as
+  `libs/queue`/`libs/workflow`'s own copies — MySQL `ER_DUP_ENTRY`/Postgres `23505`/SQLite
+  `SQLITE_CONSTRAINT_PRIMARYKEY`/`SQLITE_CONSTRAINT_UNIQUE`). `UserRepository` gained
+  `addRole`/`removeRole`; `RoleRepository` gained `addPermission`/`removePermission` — each uses
+  TypeORM's relation query builder (`.createQueryBuilder().relation(Entity, 'relationName').of(id)
+  .add(otherId)`/`.remove(otherId)`) to write a single `(userId, roleId)`/`(roleId, permissionId)`
+  row directly to the join table, instead of loading the full array and `save()`-ing a recomputed
+  one. A single-row `INSERT` has no read-modify-write race — it's atomic at the database level on
+  every driver, including sqlite. `.add()` hitting the join table's own composite primary key
+  (already-granted case) is caught via `isDuplicateKeyError` and treated as a no-op, matching the
+  previous behavior; `.remove()` matching zero rows (never-granted case) is already a normal no-op
+  DELETE. `AuthorizationService.assignRole`/`revokeRole`/`grantPermission`/`revokePermission`
+  rewritten to call these instead of `save()` with a computed array — no `TransactionExecutor`/
+  `@Transactional()` needed at all in the final version, since each operation is already atomic.
+- Updated `authorization.service.spec.ts`'s mocks and the four affected `describe` blocks for the
+  new call shape; updated `auth.integration.spec.ts`'s two RBAC tests that broke during the
+  pessimistic-locking attempt (now pass again, unmodified from the original approach's perspective
+  — the service's public behavior is unchanged for the happy path). Added two new integration
+  tests: assigning the same role twice is idempotent, and — the direct regression test for the bug
+  this loop fixes — concurrent `assignRole` calls granting *different* roles to the same user both
+  land (previously, the losing call's grant would have been silently overwritten).
+
+## Why
+
+- The race is real and previously unflagged — RBAC read-modify-write via a full-relation-array
+  `save()` is exactly the RBAC surface's own version of the "load stale state, write your own
+  computed version back" shape, distinct from (but same root cause as) the composite-key-collision
+  bugs found elsewhere this session.
+- The pivot away from pessimistic locking wasn't a style preference — it was forced by verifying
+  the fix against this library's actual, established test infrastructure (sqlite, Docker-optional)
+  rather than assuming a textbook-correct fix would work here. Direct join-table writes are
+  strictly better for this codebase: no locking primitive needed at all, works identically on
+  every driver, and is a smaller, more targeted diff than either transactional approach.
+- Live verification against the real MySQL running in this environment's Docker was attempted
+  (per this library's own Loop 007 precedent for driver-specific behavior) but abandoned partway:
+  the `app` database user lacks `CREATE DATABASE` privileges to build an isolated scratch schema,
+  and running `synchronize: true` against the shared dev `app` database surfaced a pre-existing
+  schema mismatch on the first attempt — continuing risked corrupting real dev data for a
+  verification that the sqlite integration suite (including the new concurrent-race regression
+  test) and the already-proven `isDuplicateKeyError`/MySQL-`ER_DUP_ENTRY` pattern (used
+  successfully elsewhere in this codebase) already provide adequate confidence for. No changes
+  were made to the shared MySQL database.
+
+## Tests
+
+`libs/auth` suite: 19 spec files / 142 tests (up from 140 — 2 new integration tests, net of the
+4 rewritten `describe` blocks). Full monorepo suite: 145 suites / 1175 tests, all passing.
+
+## Build
+
+PASS (`npm run typecheck`)
+
+## Lint
+
+PASS (`npm run lint`)
+
+## Remaining TODO
+
+- Unchanged: login brute-force protection (Loop 015's carried-over item, needs a design decision).
+- The pessimistic-locking dead end (repository methods added then removed, `@Transactional()`
+  considered then dropped) is fully backed out — no residual code from that attempt remains.
+
+## Next Loop
+
+- No Critical/High findings remain open. `libs/auth` now has two consecutive adversarial passes
+  this session (Loop 017 clean, Loop 018 one real Medium found and fixed) — matching the "two
+  consecutive clean/resolved passes" stopping point the rest of this session's libraries reached.
+
+---
+
+**Addendum (2026-07-23):** The "login brute-force protection" item carried as an open TODO since
+Loop 015 (and incorrectly re-carried as still-open by Loops 017/018 above) was already resolved
+before either of those loops ran: `libs/ratelimit/LOOP.md` Loop 002 (2026-07-22, the day *after*
+Loop 015 wrote this file but the day *before* Loop 017/018) added a `login: { limit: 5, windowMs:
+60_000 }` rate limiter and applied `@RateLimit('login')` to `AuthController.login` directly
+(confirmed still present in `libs/auth/src/http/auth.controller.ts`, and in
+`apps/server/src/app.module.ts`'s configured limiters). No design decision or further work is
+needed here — rate-limiting (the option this item's own text named) is what got built, not
+account lockout or CAPTCHA. Closing this out; it should not be carried forward again.
+
+---
+
+# Loop 019
+
+**Library:** libs/auth
+**Date:** 2026-07-23
+
+## Goal
+
+Close Loop 018's explicitly-flagged gap: the concurrent-`assignRole` race fix was verified only
+against in-memory sqlite (`better-sqlite3` serializes every query onto one connection, so two
+"concurrent" `Promise.all` calls never actually race at the storage engine) because the `app`
+MySQL user lacked `CREATE DATABASE` privileges to build an isolated scratch schema, and
+`synchronize: true` against the shared dev `app` database was correctly judged too risky to
+attempt. Get real MySQL verification without touching the shared dev database.
+
+## Files Reviewed
+
+- No source changes — this loop only adds verification infrastructure and a test.
+- `domain/user.repository.ts`'s `addRole`/`removeRole` (Loop 018's fix) and
+  `domain/is-duplicate-key-error.ts` (confirmed `ER_DUP_ENTRY` — MySQL's real duplicate-key error
+  code — was already handled, alongside the sqlite/Postgres codes the existing test suite
+  exercises).
+
+## Problems Found
+
+None — this loop is verification-only, not a review pass.
+
+## Changes Made
+
+- Local dev infra: created a scratch database (`app_scratch`) in the `make compose-up` MySQL
+  instance and granted the `app` user `CREATE`/`DROP` privileges plus full rights on that schema
+  only — the shared `app` database's privileges are unchanged. This is a one-time local
+  environment change, not a code or migration change.
+- New `auth-concurrency.mysql.integration.spec.ts`: the same concurrent-`assignRole` regression
+  as `auth.integration.spec.ts`, rebuilt against a real `mysql` `DataSource` (via `mysql2`) instead
+  of `better-sqlite3`, so two `Promise.all`-concurrent calls actually land on separate pooled
+  connections. Runs the race 20 times per test run (a single pair can pass by luck even against a
+  genuinely racy implementation) — all 20 land both grants with real MySQL under real connection
+  concurrency. Gated behind `RUN_MYSQL_INTEGRATION_TESTS=1` (skipped by default via
+  `describe.skip`) so `npm test` stays hermetic and doesn't require `make compose-up` for
+  contributors without Docker running.
+
+## Why
+
+- Loop 018's fix (direct join-table `INSERT` via `addRole` instead of load-modify-`save()`) was
+  already correct by inspection and passed under sqlite, but ci.loop's own workflow-lib precedent
+  (Loop 007) established that driver-specific behavior deserves live verification when available,
+  not just unit-level confidence — this closes that exact gap for `libs/auth`, using the same
+  environment the workflow-lib fix (Loop 021, same day) verifies against.
+- Risk: LOW. No production code changed — only a new opt-in test file and a local-only DB grant
+  scoped to a scratch schema that doesn't touch `app`'s existing tables or data.
+
+## Tests
+
+`libs/auth` suite: 20 spec files / 143 tests (up from 142 — one new MySQL-gated test, skipped by
+default). With `RUN_MYSQL_INTEGRATION_TESTS=1`: 143/143 passing including the new MySQL spec.
+Full monorepo default suite: 149 suites / 1194 tests, all passing (2 suites/2 tests skipped by
+default — this loop's addition plus `libs/workflow`'s companion).
+
+## Build
+
+PASS (`npm run typecheck`)
+
+## Lint
+
+PASS (`npm run lint`)
+
+## Remaining TODO
+
+- None outstanding for this library.
+
+## Next Loop
+
+- No Critical/High/Medium findings remain open, and the one previously-flagged verification gap
+  is now closed. `libs/auth` remains at a natural stopping point per Section 16 until a new
+  concrete finding or requirement surfaces.
+
+---
+
+# Loop 020
+
+**Library:** libs/auth
+**Date:** 2026-07-23
+
+## Goal
+
+User-requested feature: track a client-supplied `deviceId` on issued refresh tokens, matching
+the scope the user explicitly chose over two richer alternatives (session-listing/revocation
+endpoints, or replace-on-relogin eviction semantics) — pure storage, no behavior change, smallest
+safe diff for a schema-touching change.
+
+## Files Reviewed
+
+- `domain/refresh-token.entity.ts`, `application/refresh-token.service.ts` (`RefreshTokenMetadata`,
+  `issue()`), `http/auth.controller.ts` (`metadata()` helper, `login`/`refresh` handlers),
+  `dto/login.dto.ts`, `dto/refresh.dto.ts` — confirmed `createdByIp`/`userAgent` already
+  established the exact pattern being extended (nullable forensic-metadata column, populated only
+  by the controller's `login`/`refresh` handlers, no lookup/uniqueness semantics).
+
+## Problems Found
+
+None — this is a feature addition, not a review pass.
+
+## Changes Made
+
+- `domain/refresh-token.entity.ts`: added nullable `deviceId` column, same shape as
+  `createdByIp`/`userAgent`.
+- New migration `1753300000000-RefreshTokenDeviceId.migration.ts`: additive `ALTER TABLE ADD
+  COLUMN`, nullable, no backfill needed. Registered in `persistence/migrations/index.ts`.
+- `application/refresh-token.service.ts`: `RefreshTokenMetadata` gained an optional `deviceId`;
+  `issue()` persists it (`null` when omitted, preserving existing behavior for every caller that
+  doesn't send one).
+- `dto/login.dto.ts`/`dto/refresh.dto.ts`: optional `deviceId` field (`@IsOptional() @IsString()
+  @MaxLength(255)`), documented in Swagger as opaque client metadata, not validated for format.
+- `http/auth.controller.ts`: `metadata()` helper now also threads `deviceId` from the DTO into
+  `RefreshTokenMetadata` (IP/user-agent stay derived from the request itself; `deviceId` is the
+  one field that can only come from the caller, since it isn't observable server-side).
+- Tests: `refresh-token.service.spec.ts` (deviceId persisted or `null`), `auth.controller.spec.ts`
+  (deviceId forwarded from DTO to metadata), `auth.integration.spec.ts` (real DataSource
+  round-trip: login with a deviceId → stored on the refresh-token row), and updated
+  `1753000000000-InitialAuthSchema.migration.spec.ts` to also run the new migration (that spec
+  inserts real `RefreshTokenEntity` rows against the migrated schema, so it needs every migration
+  that alters a table it touches, not just the initial one — undoes both migrations at teardown).
+
+## Why
+
+- Risk: MEDIUM (schema change) per ci.loop §18, despite being purely additive/nullable and
+  behavior-preserving — any schema change gets that floor regardless of blast radius. Confirmed
+  scope with the user via `AskUserQuestion` before touching anything, given two materially
+  different (and higher-risk) alternatives existed: session-listing/revocation endpoints would
+  add public API surface, and replace-on-relogin eviction would change
+  `maxActiveSessionsPerUser`'s existing semantics (libs/auth/ARCH.md).
+- No ARCH.md entry: this doesn't move a bounded-context or aggregate boundary — it's a new column
+  on an already-existing aggregate, following an already-established pattern (`createdByIp`/
+  `userAgent`) exactly. Section 0.7's bar for an ARCH.md entry (a design-level decision) isn't met.
+- The migration was **not** run against the shared `make compose-up` `app` database this loop —
+  only exercised via sqlite (`synchronize: true`) and the `app_scratch` scratch schema (via the
+  existing MySQL-gated auth spec, which uses `synchronize: true` from the current entity and so
+  picked up the new column automatically). It will apply automatically the next time the real app
+  starts, via `.env`'s `MYSQL_MIGRATIONS_RUN=true` — consistent with this session's established
+  caution around not touching the shared dev database directly.
+
+## Tests
+
+`libs/auth` suite: 21 spec files / 148 tests (up from 145 — 3 new tests, one existing migration
+spec extended). Full monorepo default suite: 149 suites / 1197 tests, all passing (4 suites/5
+tests skipped by default, unchanged from Loop 019). MySQL-gated `auth-concurrency.mysql`
+re-verified passing with the new column present via `synchronize: true`.
+
+## Build
+
+PASS (`npm run typecheck`)
+
+## Lint
+
+PASS (`npm run lint`)
+
+## Remaining TODO
+
+- None outstanding for this addition. Session-listing/revocation endpoints and replace-on-relogin
+  eviction remain available as future scope if the user wants either later — deliberately not
+  built now, per the scope they chose.
+
+## Next Loop
+
+- No Critical/High/Medium findings open. `libs/auth` remains at a natural stopping point per
+  Section 16 until a new concrete finding or requirement surfaces.
+
+---
+
+# Loop 021
+
+**Library:** libs/auth
+**Date:** 2026-07-23
+
+## Goal
+
+Wire `AuthorizationService`'s 8 RBAC mutation methods into the new `libs/audit` Audit Module
+(`libs/audit/ARCH.md` Design 001; `libs/audit/LOOP.md` Loop 001) — a concrete new requirement, not
+a discovered defect.
+
+## Files Reviewed
+
+- `application/authorization.service.ts` — every mutation method's write path (the point to record
+  after, not before, since a failed write should never produce a false audit entry).
+- `http/role.controller.ts` — confirmed `@CurrentUser()` was already available to every route via
+  `JwtAuthGuard`, so forwarding the acting user's id needed no new guard/decorator.
+
+## Problems Found
+
+N/A — feature addition, not a review pass.
+
+## Changes Made
+
+- `AuthorizationService` constructor-injects `AuditService` (`@/audit`). Each of `createPermission`,
+  `createRole`, `deleteRole`, `deletePermission`, `grantPermission`, `revokePermission`,
+  `assignRole`, `revokeRole` gained an optional trailing `actorId?: string` parameter (additive —
+  not a breaking signature change) and now calls `this.audit.record(...)` immediately after its
+  write succeeds.
+- `RoleController`: every route now also takes `@CurrentUser()` and forwards `user.userId` as the
+  new `actorId` argument.
+- Updated `authorization.service.spec.ts` (audit mock + assertion added to all 8 happy-path tests)
+  and rewrote `role.controller.spec.ts` (every delegation test now passes and asserts the acting
+  user). Stubbed `AuditService` in both real-DataSource integration specs
+  (`auth.integration.spec.ts`, `auth-concurrency.mysql.integration.spec.ts`) — real audit
+  persistence is `libs/audit`'s own test's concern, not these suites'.
+- Documented as `libs/auth/ARCH.md` Design 007 (new `@/audit` dependency).
+
+## Why
+
+See `libs/audit/ARCH.md` Design 001 for the full cross-lib rationale. Recording *after* the write
+(not wrapping both in a transaction) matches this monorepo's existing reality that no code path
+anywhere uses `@Transactional()` (`libs/auth/ARCH.md` Design 006) — inventing that guarantee for
+one new write wasn't justified by a stated requirement.
+
+## Tests
+
+`libs/auth` suite: unchanged test-file count, 8 existing tests extended with audit assertions, full
+`role.controller.spec.ts` rewritten (11 tests, all delegation + acting-user forwarding). Full
+monorepo suite: 154 suites / 1216 tests passing (see `libs/audit/LOOP.md` Loop 001 for the combined
+before/after count across all three touched libraries).
+
+## Build
+
+PASS (`npm run typecheck`)
+
+## Lint
+
+PASS (`npm run lint`)
+
+## Remaining TODO
+
+- Unchanged from Loop 020.
+
+## Next Loop
+
+- No Critical/High/Medium findings open. `libs/auth` remains at a natural stopping point per
+  Section 16 until a new concrete finding or requirement surfaces.

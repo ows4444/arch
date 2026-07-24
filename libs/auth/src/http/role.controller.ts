@@ -19,9 +19,10 @@ import { CreateRoleDto } from '../dto/create-role.dto';
 import { CreatePermissionDto } from '../dto/create-permission.dto';
 import { RoleResponseDto } from '../dto/role-response.dto';
 import { PermissionResponseDto } from '../dto/permission-response.dto';
-import { JwtAuthGuard } from '../guards/jwt-auth.guard';
+import { JwtAuthGuard, type AuthenticatedUser } from '../guards/jwt-auth.guard';
 import { PermissionsGuard } from '../guards/permissions.guard';
 import { Permissions } from '../decorators/permissions.decorator';
+import { CurrentUser } from '../decorators/current-user.decorator';
 
 /**
  * Every route here requires the `roles:manage` permission — there is no
@@ -45,8 +46,13 @@ export class RoleController {
   @ApiResponse({ status: 409, description: 'Permission already exists' })
   createPermission(
     @Body() dto: CreatePermissionDto,
+    @CurrentUser() user: AuthenticatedUser,
   ): Promise<PermissionResponseDto> {
-    return this.authorization.createPermission(dto.name, dto.description);
+    return this.authorization.createPermission(
+      dto.name,
+      dto.description,
+      user.userId,
+    );
   }
 
   @Permissions('roles:manage')
@@ -58,8 +64,15 @@ export class RoleController {
     status: 400,
     description: 'One of the requested permissions does not exist',
   })
-  createRole(@Body() dto: CreateRoleDto): Promise<RoleResponseDto> {
-    return this.authorization.createRole(dto.name, dto.permissions ?? []);
+  createRole(
+    @Body() dto: CreateRoleDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ): Promise<RoleResponseDto> {
+    return this.authorization.createRole(
+      dto.name,
+      dto.permissions ?? [],
+      user.userId,
+    );
   }
 
   @Permissions('roles:manage')
@@ -68,6 +81,51 @@ export class RoleController {
   @ApiResponse({ status: 200, type: [RoleResponseDto] })
   listRoles(): Promise<RoleResponseDto[]> {
     return this.authorization.listRoles();
+  }
+
+  @Permissions('roles:manage')
+  @HttpCode(204)
+  @Delete('roles/:roleName')
+  @ApiOperation({
+    summary: 'Delete a role',
+    description:
+      "Also revokes this role from every user currently holding it (auth_user_roles' " +
+      'roleId foreign key cascades on delete).',
+  })
+  @ApiResponse({ status: 204, description: 'Role deleted' })
+  @ApiResponse({ status: 404, description: 'Role not found' })
+  async deleteRole(
+    @Param('roleName') roleName: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ): Promise<void> {
+    await this.authorization.deleteRole(roleName, user.userId);
+  }
+
+  @Permissions('roles:manage')
+  @HttpCode(204)
+  @Delete('permissions/:permissionName')
+  @ApiOperation({
+    summary: 'Delete a permission',
+    description:
+      "Also revokes this permission from every role currently granting it (auth_role_permissions' " +
+      'permissionId foreign key cascades on delete).',
+  })
+  @ApiResponse({ status: 204, description: 'Permission deleted' })
+  @ApiResponse({ status: 400, description: 'Permission does not exist' })
+  async deletePermission(
+    @Param('permissionName') permissionName: string,
+    @CurrentUser() user: AuthenticatedUser,
+  ): Promise<void> {
+    await this.authorization.deletePermission(permissionName, user.userId);
+  }
+
+  @Permissions('roles:manage')
+  @Get('users/:userId/roles')
+  @ApiOperation({ summary: "List a single user's assigned roles" })
+  @ApiResponse({ status: 200, type: [RoleResponseDto] })
+  @ApiResponse({ status: 404, description: 'User not found' })
+  listUserRoles(@Param('userId') userId: string): Promise<RoleResponseDto[]> {
+    return this.authorization.listUserRoles(userId);
   }
 
   @Permissions('roles:manage')
@@ -82,8 +140,13 @@ export class RoleController {
   grantPermission(
     @Param('roleName') roleName: string,
     @Param('permissionName') permissionName: string,
+    @CurrentUser() user: AuthenticatedUser,
   ): Promise<RoleResponseDto> {
-    return this.authorization.grantPermission(roleName, permissionName);
+    return this.authorization.grantPermission(
+      roleName,
+      permissionName,
+      user.userId,
+    );
   }
 
   @Permissions('roles:manage')
@@ -98,8 +161,13 @@ export class RoleController {
   revokePermission(
     @Param('roleName') roleName: string,
     @Param('permissionName') permissionName: string,
+    @CurrentUser() user: AuthenticatedUser,
   ): Promise<RoleResponseDto> {
-    return this.authorization.revokePermission(roleName, permissionName);
+    return this.authorization.revokePermission(
+      roleName,
+      permissionName,
+      user.userId,
+    );
   }
 
   @Permissions('roles:manage')
@@ -111,8 +179,9 @@ export class RoleController {
   async assignRole(
     @Param('userId') userId: string,
     @Param('roleName') roleName: string,
+    @CurrentUser() user: AuthenticatedUser,
   ): Promise<void> {
-    await this.authorization.assignRole(userId, roleName);
+    await this.authorization.assignRole(userId, roleName, user.userId);
   }
 
   @Permissions('roles:manage')
@@ -124,7 +193,8 @@ export class RoleController {
   async revokeRole(
     @Param('userId') userId: string,
     @Param('roleName') roleName: string,
+    @CurrentUser() user: AuthenticatedUser,
   ): Promise<void> {
-    await this.authorization.revokeRole(userId, roleName);
+    await this.authorization.revokeRole(userId, roleName, user.userId);
   }
 }

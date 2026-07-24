@@ -17,6 +17,19 @@ export interface AuthModuleOptions {
 
   refreshTokenTtlSeconds?: number;
 
+  /**
+   * Caps how many refresh tokens (i.e. distinct logged-in devices/sessions)
+   * a single user can have active at once. Issuing a new one past the cap
+   * silently evicts the least-recently-issued active session rather than
+   * rejecting the new login — see `RefreshTokenService.issue`. Defaults to
+   * `DEFAULT_MAX_ACTIVE_SESSIONS_PER_USER` (5).
+   */
+  maxActiveSessionsPerUser?: number;
+
+  passwordResetTokenTtlSeconds?: number;
+
+  emailVerificationTokenTtlSeconds?: number;
+
   passwordHasher?: PasswordHasher;
 
   accessTokenDenylist?: AccessTokenDenylist;

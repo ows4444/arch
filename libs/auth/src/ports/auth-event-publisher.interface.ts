@@ -1,5 +1,7 @@
 import type {
+  EmailVerificationRequestedEvent,
   PasswordChangedEvent,
+  PasswordResetRequestedEvent,
   RefreshTokenReuseDetectedEvent,
   UserLoggedInEvent,
   UserRegisteredEvent,
@@ -14,5 +16,13 @@ export interface AuthEventPublisher {
 
   publishRefreshTokenReuseDetected(
     event: RefreshTokenReuseDetectedEvent,
+  ): Promise<void>;
+
+  publishPasswordResetRequested(
+    event: PasswordResetRequestedEvent,
+  ): Promise<void>;
+
+  publishEmailVerificationRequested(
+    event: EmailVerificationRequestedEvent,
   ): Promise<void>;
 }
