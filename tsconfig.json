@@ -26,6 +26,12 @@
     "noUncheckedIndexedAccess": true,
     "noFallthroughCasesInSwitch": true,
     "paths": {
+      "@/audit": [
+        "libs/audit/src"
+      ],
+      "@/audit/*": [
+        "libs/audit/src/*"
+      ],
       "@/auth": [
         "libs/auth/src"
       ],
@@ -50,6 +56,12 @@
       "@/queue/*": [
         "libs/queue/src/*"
       ],
+      "@/notification": [
+        "libs/notification/src"
+      ],
+      "@/notification/*": [
+        "libs/notification/src/*"
+      ],
       "@/workflow": [
         "libs/workflow/src"
       ],
@@ -61,6 +73,18 @@
       ],
       "@/validation/*": [
         "libs/validation/src/*"
+      ],
+      "@/users": [
+        "libs/users/src"
+      ],
+      "@/users/*": [
+        "libs/users/src/*"
+      ],
+      "@/ratelimit": [
+        "libs/ratelimit/src"
+      ],
+      "@/ratelimit/*": [
+        "libs/ratelimit/src/*"
       ]
     }
   }

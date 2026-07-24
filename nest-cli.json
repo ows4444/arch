@@ -17,6 +17,15 @@
         "tsConfigPath": "apps/server/tsconfig.app.json"
       }
     },
+    "audit": {
+      "type": "library",
+      "root": "libs/audit",
+      "entryFile": "index",
+      "sourceRoot": "libs/audit/src",
+      "compilerOptions": {
+        "tsConfigPath": "libs/audit/tsconfig.lib.json"
+      }
+    },
     "auth": {
       "type": "library",
       "root": "libs/auth",
@@ -44,6 +53,15 @@
         "tsConfigPath": "libs/database/tsconfig.lib.json"
       }
     },
+    "notification": {
+      "type": "library",
+      "root": "libs/notification",
+      "entryFile": "index",
+      "sourceRoot": "libs/notification/src",
+      "compilerOptions": {
+        "tsConfigPath": "libs/notification/tsconfig.lib.json"
+      }
+    },
     "queue": {
       "type": "library",
       "root": "libs/queue",
@@ -53,6 +71,15 @@
         "tsConfigPath": "libs/queue/tsconfig.lib.json"
       }
     },
+    "ratelimit": {
+      "type": "library",
+      "root": "libs/ratelimit",
+      "entryFile": "index",
+      "sourceRoot": "libs/ratelimit/src",
+      "compilerOptions": {
+        "tsConfigPath": "libs/ratelimit/tsconfig.lib.json"
+      }
+    },
     "validation": {
       "type": "library",
       "root": "libs/validation",
@@ -60,6 +87,15 @@
       "sourceRoot": "libs/validation/src",
       "compilerOptions": {
         "tsConfigPath": "libs/validation/tsconfig.lib.json"
+      }
+    },
+    "users": {
+      "type": "library",
+      "root": "libs/users",
+      "entryFile": "index",
+      "sourceRoot": "libs/users/src",
+      "compilerOptions": {
+        "tsConfigPath": "libs/users/tsconfig.lib.json"
       }
     },
     "worker": {

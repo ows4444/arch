@@ -12,6 +12,9 @@
     "start:dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",
     "start:prod": "node dist/apps/server/main",
+    "start:worker": "nest start worker",
+    "start:worker:dev": "nest start worker --watch",
+    "start:worker:prod": "node dist/apps/worker/main",
     "lint": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix",
     "test": "jest",
     "test:watch": "jest --watch",
@@ -90,12 +93,16 @@
       "<rootDir>/apps/"
     ],
     "moduleNameMapper": {
+      "^@/audit(|/.*)$": "<rootDir>/libs/audit/src/$1",
       "^@/auth(|/.*)$": "<rootDir>/libs/auth/src/$1",
       "^@/cache(|/.*)$": "<rootDir>/libs/cache/src/$1",
       "^@/database(|/.*)$": "<rootDir>/libs/database/src/$1",
       "^@/queue(|/.*)$": "<rootDir>/libs/queue/src/$1",
+      "^@/notification(|/.*)$": "<rootDir>/libs/notification/src/$1",
       "^@/workflow(|/.*)$": "<rootDir>/libs/workflow/src/$1",
-      "^@/validation(|/.*)$": "<rootDir>/libs/validation/src/$1"
+      "^@/validation(|/.*)$": "<rootDir>/libs/validation/src/$1",
+      "^@/ratelimit(|/.*)$": "<rootDir>/libs/ratelimit/src/$1",
+      "^@/users(|/.*)$": "<rootDir>/libs/users/src/$1"
     }
   }
 }
