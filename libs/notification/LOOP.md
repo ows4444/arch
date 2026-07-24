@@ -112,3 +112,98 @@ instead of nested matchers)
   distinguishes: unit (mocked), and live (real MySQL/Redis/RabbitMQ, real two-app HTTP-to-queue-to-
   consumer round trip). Next work should come from a concrete new requirement (most likely: a real
   email provider adapter, if/when this ever deploys somewhere that needs actual delivery).
+
+# Loop 002
+
+**Library:** libs/notification (+ apps/worker's EmailNotificationConsumer)
+**Date:** 2026-07-24
+
+## Goal
+
+Fresh Phase 1/2 review pass (`ci.loop` §§1–2) — the first since Loop 001's initial build and
+live-verification. Loop 001 verified the happy path end to end; this loop specifically asked "what
+happens when the email actually fails to send," since that path was never exercised (both shipped
+adapters, `NoopEmailSender`/`LoggingEmailSender`, never throw).
+
+## Files Reviewed
+
+- `application/notification.service.ts`, both `adapters/*.ts`, `ports/*.interface.ts`,
+  `notification.module.ts`, `notification.types.ts`, `notification.constants.ts`,
+  `queue/notification-email.topology.ts`, `queue/email-message.payload.ts`, `index.ts` — re-read
+  end to end.
+- `apps/worker/src/queue/email-notification.consumer.ts` — the one place a thrown `EmailSender`
+  failure actually goes.
+- `libs/queue/src/consumer/rmq-consumer.runtime.ts` (`getRetryDecision`,
+  `invokeHandler`/the main catch block) and `libs/queue/src/consumer/rmq-payload-validator.ts` —
+  to understand exactly what `libs/queue` does with a handler's thrown error, rather than assuming.
+- `apps/server/src/notifications/queue-auth-event-publisher.ts` — the enqueue side; confirmed
+  clean (delegates to `OutboxService.enqueue`, no notification-specific concern).
+
+## Problems Found
+
+**Medium**
+- `NOTIFICATION_EMAIL_TOPOLOGY.QUEUES.send` declares `retry: retry({ strategy: [1, 5, 15] })`, but
+  `RMQConsumerRuntime.getRetryDecision` only retries an error that's `instanceof
+  RetryableMessageError` (confirmed by reading the runtime directly, not assumed) — every other
+  thrown error nacks without requeue on the very first failure, straight to the DLQ.
+  `EmailNotificationConsumer.handleSend` awaited `NotificationService.sendEmail(payload)` with no
+  try/catch, so any error it threw propagated as a plain `Error`, never retried. Not a live bug
+  today — `NoopEmailSender`/`LoggingEmailSender` never throw — but the moment a real SMTP/SendGrid/
+  SES adapter is wired (ARCH.md's own stated next step), every transient send failure (network
+  blip, provider rate-limit) would dead-letter after exactly one attempt instead of the three the
+  topology already declares. Confirmed the payload itself is already separately guarded — a
+  structurally malformed message throws `NonRetryableMessageError` from `rmq-payload-validator.ts`
+  before the handler ever runs — so by the time `handleSend` runs, a thrown error can only be a
+  genuine delivery failure, making "retryable" the correct default classification for anything
+  it can throw.
+
+## Changes Made
+
+- `EmailNotificationConsumer.handleSend`: wraps the `sendEmail` call in try/catch, rethrowing any
+  caught error as `RetryableMessageError` (from `@/queue`) with the original message preserved.
+  Fixed at the consumer, not inside `NotificationService`/`libs/notification` itself —
+  `libs/notification`'s ARCH.md Context Map explicitly scopes the library to "no publish/consume
+  calls of its own," and pulling in `@/queue`'s `RetryableMessageError` there would be exactly the
+  queue-specific coupling that boundary was drawn to avoid. `apps/worker` already owns the
+  `@RMQConsumer` handler, so the classification decision belongs there.
+- New test: a `sendEmail` rejection surfaces from `handleSend` as `RetryableMessageError` with the
+  original error's message preserved.
+
+## Why
+
+Per `ci.loop` §17 (never trade correctness for elegance): a declared reliability guarantee
+(`retry: retry({ strategy: [1, 5, 15] })`) that can structurally never trigger is worse than not
+declaring it at all — it reads as "failures retry" to anyone configuring or debugging this queue,
+when they in fact don't. Fixing now rather than deferring to "whenever a real adapter is built" per
+Open Questions: this isn't building the speculative adapter itself, it's closing the gap between
+what the topology already claims and what the code actually does — the same class of fix as
+Loop 012's `libs/ratelimit` fail-open gap (a documented guarantee silently unreachable via one
+specific path).
+
+## Tests
+
+`libs/notification` suite: unchanged (5 tests, no notification-lib code touched — the fix lives in
+`apps/worker`). `apps/worker` suite: 7 of 7 suites passing, gains 1 test. Full monorepo
+`make check`: 159 of 164 suites passing (5 skipped by design), 1238 tests passing (up from 1237).
+
+## Build
+
+PASS (`npm run typecheck`)
+
+## Lint
+
+PASS (`npm run lint`)
+
+## Remaining TODO
+
+- Unchanged from Loop 001: no real SMTP/SendGrid/SES adapter yet; SMS/push/in-app channels and the
+  other four `libs/auth` events remain out of scope until a concrete trigger appears. When a real
+  adapter is eventually built, its own errors should distinguish permanent failures (e.g. a
+  provider's hard-bounce/invalid-recipient rejection) from transient ones if that distinction
+  becomes concretely necessary — today's blanket "always retryable" is the correct default with
+  only synthetic (never-throwing) adapters in play, not a permanent design decision.
+
+## Next Loop
+
+- No Critical/High findings remain open. `libs/notification` returns to a natural stopping point
+  per Section 16 until a real email provider adapter (or another concrete requirement) appears.
