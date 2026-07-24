@@ -32,7 +32,14 @@ export class DatabaseQueueInboxService implements QueueInboxService {
     operation: () => Promise<void>,
   ): Promise<boolean> {
     return this.transactionExecutor.execute(async () => {
-      const id = `${consumerKey}:${messageId}`;
+      // JSON-encode rather than concatenate with a plain separator: a bare
+      // `${consumerKey}:${messageId}` would let two distinct pairs collide
+      // whenever either value contains a `:` (e.g. consumerKey="a:b",
+      // messageId="c" vs. consumerKey="a", messageId="b:c" both produce
+      // "a:b:c"). JSON.stringify escapes both values, so distinct pairs
+      // always produce distinct ids. A collision here would silently drop a
+      // genuine message as a false "duplicate" (isDuplicateKeyError below).
+      const id = JSON.stringify([consumerKey, messageId]);
 
       try {
         await this.inbox.insert({

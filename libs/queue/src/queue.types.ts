@@ -28,6 +28,30 @@ export interface QueueModuleOptions {
   outbox?: QueueOutboxOptions;
 
   inbox?: boolean;
+
+  /**
+   * Upper bound `resolvePrefetch()` enforces on top of `prefetch` /
+   * per-consumer overrides. Defaults to `RMQConnection`'s existing 100.
+   */
+  maxPrefetch?: number;
+
+  /**
+   * How many attempts `RMQConnection`'s one-time raw topology-bootstrap
+   * connection makes before giving up. Defaults to 10.
+   */
+  rawConnectionMaxRetries?: number;
+
+  /**
+   * Base delay (ms) for the raw connection's exponential backoff between
+   * retries. Defaults to 1000.
+   */
+  rawConnectionBaseDelayMs?: number;
+
+  /**
+   * Ceiling (ms) the raw connection's exponential backoff is clamped to.
+   * Defaults to 30000.
+   */
+  rawConnectionMaxDelayMs?: number;
 }
 
 export interface QueueOptionsFactory {

@@ -108,6 +108,31 @@ describe('RMQConnection raw connection retry/backoff', () => {
       jest.useRealTimers();
     }
   });
+
+  it('respects a configured rawConnectionMaxRetries instead of the library default', async () => {
+    jest.useFakeTimers();
+
+    try {
+      const finalError = new Error('ECONNREFUSED: final attempt');
+      mockedConnect.mockRejectedValue(finalError);
+
+      const connection = new RMQConnection({
+        ...baseOptions(),
+        rawConnectionMaxRetries: 2,
+      });
+
+      const channelPromise = connection.createRawChannel();
+      const assertion = expect(channelPromise).rejects.toBe(finalError);
+
+      await jest.advanceTimersByTimeAsync(60_000);
+
+      await assertion;
+
+      expect(mockedConnect).toHaveBeenCalledTimes(2);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 });
 
 describe('RMQConnection.resolvePrefetch', () => {
@@ -151,6 +176,15 @@ describe('RMQConnection.resolvePrefetch', () => {
     const connection = new RMQConnection(baseOptions());
 
     expect(() => connection.resolvePrefetch(1.5)).toThrow(
+      QueueConfigurationError,
+    );
+  });
+
+  it('respects a configured maxPrefetch instead of the library default', () => {
+    const connection = new RMQConnection({ ...baseOptions(), maxPrefetch: 5 });
+
+    expect(connection.resolvePrefetch(5)).toBe(5);
+    expect(() => connection.resolvePrefetch(6)).toThrow(
       QueueConfigurationError,
     );
   });

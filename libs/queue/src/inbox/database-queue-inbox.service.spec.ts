@@ -76,6 +76,25 @@ describe('DatabaseQueueInboxService', () => {
     expect(operation).toHaveBeenCalledTimes(2);
   });
 
+  it('does not collide when consumerKey/messageId concatenation would otherwise be ambiguous', async () => {
+    const operation = jest.fn().mockResolvedValue(undefined);
+
+    const ranForFirstPair = await service.withIdempotency(
+      'a:b',
+      'c',
+      operation,
+    );
+    const ranForSecondPair = await service.withIdempotency(
+      'a',
+      'b:c',
+      operation,
+    );
+
+    expect(ranForFirstPair).toBe(true);
+    expect(ranForSecondPair).toBe(true);
+    expect(operation).toHaveBeenCalledTimes(2);
+  });
+
   it('rolls back the inbox record when the operation throws, allowing a legitimate retry', async () => {
     const failingOperation = jest
       .fn()

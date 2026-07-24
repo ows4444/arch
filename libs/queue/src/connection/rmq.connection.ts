@@ -12,19 +12,27 @@ import type { QueueModuleOptions } from '../queue.types';
 export class RMQConnection {
   private static readonly DEFAULT_CONNECTION_NAME = 'nestjs-rmq';
 
-  private static readonly RAW_CONNECT_MAX_RETRIES = 10;
+  private static readonly DEFAULT_RAW_CONNECT_MAX_RETRIES = 10;
 
-  private static readonly MAX_PREFETCH = 100;
+  private static readonly DEFAULT_MAX_PREFETCH = 100;
 
-  private static readonly RAW_CONNECT_BASE_DELAY_MS = 1000;
+  private static readonly DEFAULT_RAW_CONNECT_BASE_DELAY_MS = 1000;
 
-  private static readonly RAW_CONNECT_MAX_DELAY_MS = 30_000;
+  private static readonly DEFAULT_RAW_CONNECT_MAX_DELAY_MS = 30_000;
 
   private readonly logger = new Logger(RMQConnection.name);
 
   private readonly connection: AmqpConnectionManager;
 
   private readonly resolvedConnectionName: string;
+
+  private readonly maxPrefetch: number;
+
+  private readonly rawConnectMaxRetries: number;
+
+  private readonly rawConnectBaseDelayMs: number;
+
+  private readonly rawConnectMaxDelayMs: number;
 
   private rawConnectionPromise: Promise<ChannelModel> | undefined;
 
@@ -34,6 +42,18 @@ export class RMQConnection {
   ) {
     this.resolvedConnectionName =
       options.connectionName ?? RMQConnection.DEFAULT_CONNECTION_NAME;
+
+    this.maxPrefetch =
+      options.maxPrefetch ?? RMQConnection.DEFAULT_MAX_PREFETCH;
+    this.rawConnectMaxRetries =
+      options.rawConnectionMaxRetries ??
+      RMQConnection.DEFAULT_RAW_CONNECT_MAX_RETRIES;
+    this.rawConnectBaseDelayMs =
+      options.rawConnectionBaseDelayMs ??
+      RMQConnection.DEFAULT_RAW_CONNECT_BASE_DELAY_MS;
+    this.rawConnectMaxDelayMs =
+      options.rawConnectionMaxDelayMs ??
+      RMQConnection.DEFAULT_RAW_CONNECT_MAX_DELAY_MS;
 
     this.connection = amqpConnectionManager.connect([this.options.uri], {
       connectionOptions: {
@@ -111,11 +131,7 @@ export class RMQConnection {
   private async openRawConnection(): Promise<ChannelModel> {
     let lastError: unknown;
 
-    for (
-      let attempt = 1;
-      attempt <= RMQConnection.RAW_CONNECT_MAX_RETRIES;
-      attempt++
-    ) {
+    for (let attempt = 1; attempt <= this.rawConnectMaxRetries; attempt++) {
       try {
         const connection = await connect(this.options.uri, {
           clientProperties: {
@@ -130,15 +146,15 @@ export class RMQConnection {
         lastError = error;
 
         const delay = Math.min(
-          RMQConnection.RAW_CONNECT_BASE_DELAY_MS *
+          this.rawConnectBaseDelayMs *
             (Math.pow(2, attempt - 1) + Math.random()),
-          RMQConnection.RAW_CONNECT_MAX_DELAY_MS,
+          this.rawConnectMaxDelayMs,
         );
 
         this.logger.warn({
           message: 'RabbitMQ raw connection failed',
           attempt,
-          maxRetries: RMQConnection.RAW_CONNECT_MAX_RETRIES,
+          maxRetries: this.rawConnectMaxRetries,
           retryInMs: delay,
           error: error instanceof Error ? error.message : 'Unknown error',
         });
@@ -201,9 +217,9 @@ export class RMQConnection {
       );
     }
 
-    if (prefetch > RMQConnection.MAX_PREFETCH) {
+    if (prefetch > this.maxPrefetch) {
       throw new QueueConfigurationError(
-        `RabbitMQ prefetch exceeds maximum allowed value (${RMQConnection.MAX_PREFETCH})`,
+        `RabbitMQ prefetch exceeds maximum allowed value (${this.maxPrefetch})`,
       );
     }
 

@@ -517,3 +517,261 @@ PASS (`npm run lint`)
 - No further Critical/High findings. This library remains at a natural stopping point per Section 16
   (no Critical/High open, tests/build/lint green) until a new concrete finding or user request
   surfaces.
+
+---
+
+# Loop 005
+
+**Library:** libs/queue
+**Date:** 2026-07-22
+
+## Goal
+
+Direct user request to make `RMQConnection`'s hard-coded raw-connection retry/backoff/prefetch-
+ceiling constants configurable — the one carried-over item from Loops 002/003 not tied to an
+"only revisit if a real incident happens" condition; the others (inbox-transaction-scope, the
+timed-out-handler lock-wait edge case, `TopologyBootstrap`'s long-lived connection) remain
+untouched per their own explicit deferral conditions, none of which have changed.
+
+## Files Reviewed
+
+- `libs/queue/src/connection/rmq.connection.ts`
+- `libs/queue/src/queue.types.ts` (`QueueModuleOptions`)
+- `libs/queue/src/connection/rmq.connection.spec.ts`
+
+## Problems Found
+
+**Low**
+- (the same one Loops 002/003 already found and left as-is pending a driving need — no new
+  defect; this loop supplies that need directly via user request)
+
+## Changes Made
+
+- `queue.types.ts`: `QueueModuleOptions` gained four optional fields — `maxPrefetch`,
+  `rawConnectionMaxRetries`, `rawConnectionBaseDelayMs`, `rawConnectionMaxDelayMs` — each
+  documented with its default.
+- `rmq.connection.ts`: the four `private static readonly` constants became `DEFAULT_*` fallbacks;
+  four new `private readonly` instance fields resolve `options.<field> ?? DEFAULT_*` in the
+  constructor, and every use site (`openRawConnection`'s retry loop/backoff calc,
+  `validatePrefetch`'s ceiling check) now reads the instance field instead of the static constant.
+  No behavior change when the new options are omitted — defaults are identical to the previous
+  hard-coded values.
+- `rmq.connection.spec.ts`: added two regression tests — a configured `rawConnectionMaxRetries: 2`
+  exhausting after 2 attempts (not the library default of 10), and a configured `maxPrefetch: 5`
+  accepting 5 but rejecting 6.
+
+## Why
+
+Per Section 17 ("every refactor must have measurable value" / don't add config surface without a
+need), Loops 002/003 correctly declined to do this speculatively — "no concrete driving use case"
+was the stated reason. A direct user request is itself the driving need (same standard already
+applied in Loop 004, done "per direct user request" without further per-item justification).
+Kept the change minimal: default values are unchanged, so no existing deployment's behavior shifts
+unless it opts in by setting one of the four new options.
+
+## Tests
+
+`libs/queue` suite: 25 spec files / 136 tests (up from 25/134 — two new regression tests). Full
+monorepo suite: 135 suites / 1060 tests, all passing.
+
+## Build
+
+PASS (`npm run typecheck`; also explicitly verified `npx nest build server` and
+`npx nest build worker` both compile clean)
+
+## Lint
+
+PASS (`npm run lint`)
+
+## Remaining TODO
+
+- Inbox-transaction-scope tradeoff, the timed-out-handler background-transaction edge case, and
+  `TopologyBootstrap`'s long-lived raw connection remain unchanged — each still has its own
+  explicit "revisit only if X" condition from Loops 001-003, none of which has occurred.
+- No `ARCH.md` exists for this library yet.
+
+## Next Loop
+
+- No further Critical/High findings. This library remains at a natural stopping point per
+  Section 16 (no Critical/High open, tests/build/lint green) until a new concrete finding or user
+  request surfaces.
+
+---
+
+# Loop 006
+
+**Library:** libs/queue
+**Date:** 2026-07-23
+
+## Goal
+
+Fresh adversarial Phase 1/2 pass, targeting files that hadn't had individual deep-dive
+attention in prior loop write-ups: outbox claim/dispatch (`outbox.repository.ts`,
+`outbox-dispatcher.service.ts`), `inbox.repository.ts`/`database-queue-inbox.service.ts`,
+`message-settlement.ts`, `rmq-context.factory.ts`, header parser/validator, and
+`rmq-payload-validator.ts`, plus a re-read of `rmq-consumer.runtime.ts` in full given its
+central role.
+
+## Files Reviewed
+
+- `outbox/outbox.repository.ts` (`claimBatch`'s claim-then-conditional-UPDATE pattern) — traced
+  for double-claim races between concurrent dispatchers; confirmed safe (the conditional UPDATE's
+  `WHERE status = ...` clause silently no-ops for rows already claimed by a racing dispatcher, and
+  the final `find({ claimedBy: owner })` correctly excludes them).
+- `outbox/outbox-dispatcher.service.ts` — `sweep`/`dispatch`/`markFailedAttempt`/`computeBackoff`
+  traced; the "publish succeeds but the subsequent status-update DB write fails" gap (row stays
+  `publishing` until lease expiry, then gets redispatched — a duplicate publish) is inherent,
+  accepted at-least-once outbox semantics, not a new defect.
+- `message-settlement.ts` — re-verified `settled` flag correctly prevents double ack/nack, and
+  that a thrown `channel.ack`/`channel.nack` leaves `settled` false (not falsely marked settled).
+- `context/rmq-context.factory.ts`, `context/rmq-header.parser.ts`, `context/rmq-header.validator.ts`,
+  `consumer/rmq-payload-validator.ts` — no issues.
+- `consumer/rmq-consumer.runtime.ts` (full re-read) — re-verified retry-classification allowlist
+  (Loop 004), shutdown ordering (Loop 001), inflight counting via `handlerSettled` (Loop 003's
+  documented background-transaction tradeoff) all still correct.
+- `inbox/database-queue-inbox.service.ts` + `persistence/entities/queue-inbox.entity.ts` +
+  the initial migration — found a new issue (below).
+
+## Problems Found
+
+**Critical** — (none)
+**High** — (none)
+
+**Medium**
+- `DatabaseQueueInboxService.withIdempotency` built its dedup primary key via naive string
+  concatenation: `` `${consumerKey}:${messageId}` ``. `consumerKey` is the queue name;
+  `messageId` is the AMQP message's producer-supplied `messageId` property — arbitrary, not
+  controlled by this library. Neither component is escaped, so two distinct pairs collide
+  whenever either contains a `:` (e.g. `consumerKey="a:b", messageId="c"` and
+  `consumerKey="a", messageId="b:c"` both produce `"a:b:c"`). The entity's
+  `@Index(['consumerKey', 'messageId'])` is non-unique (lookup-only) — the actual
+  dedup/uniqueness guarantee rests entirely on the derived `id` primary key. A collision means
+  the second, logically-distinct message hits `isDuplicateKeyError` and is silently treated as
+  "already processed" — its handler never runs, no error surfaced. Exact same collision-prone
+  concatenation pattern as the Redis-namespace bug fixed in `libs/cache` Loop 3/this session;
+  zero test coverage of the collision case existed.
+
+**Low** — (none newly found this loop)
+
+## Changes Made
+
+- `inbox/database-queue-inbox.service.ts`: `id` is now built via
+  `JSON.stringify([consumerKey, messageId])` instead of string concatenation — JSON-escapes both
+  values, so distinct pairs always produce distinct ids. No schema/migration change: `id` was
+  already a plain `varchar` primary column with no length constraint tight enough to matter.
+- `inbox/database-queue-inbox.service.spec.ts`: added a regression test with the exact
+  `consumerKey="a:b"/messageId="c"` vs. `consumerKey="a"/messageId="b:c"` pair, asserting both
+  are treated as distinct (both run, `operation` called twice).
+
+## Why
+
+- Direct instance of the same "composite key collision" risk category ci.loop §9 names, applied
+  here to an inbox idempotency key rather than a cache namespace — not invented or cosmetic.
+  `messageId` is producer-controlled and outside this library's control, so the collision isn't
+  purely theoretical the way an internally-generated key would be. Fix is additive/internal (the
+  `id` column's *contents* change format, but it's an opaque dedup key with no external
+  consumers reading its structure — no schema change, no public API change), so MEDIUM risk per
+  ci.loop §18, consistent with how the analogous cache fix was classified this session.
+- Existing rows with the old `consumerKey:messageId` format remain valid as opaque primary keys
+  after this change (old rows aren't rewritten, but new inserts use the new format) — no
+  migration needed since collisions were already latent corruption, not a format any code reads
+  back apart from equality/uniqueness checks.
+
+## Tests
+
+`libs/queue` suite is now 25 spec files / 137 tests (up from 136). Full monorepo suite: 145
+suites / 1171 tests, all passing.
+
+## Build
+
+PASS (`npm run typecheck`)
+
+## Lint
+
+PASS (`npm run lint`)
+
+## Remaining TODO
+
+- No `ARCH.md` exists for this library yet.
+- Inbox-transaction-scope tradeoff, the timed-out-handler background-transaction edge case, and
+  `TopologyBootstrap`'s long-lived raw connection remain unchanged — each still has its own
+  explicit "revisit only if X" condition from Loops 001-003, none of which has occurred.
+
+## Next Loop
+
+- No further Critical/High/Medium findings identified this pass beyond the one fixed. This
+  library remains at a natural stopping point per Section 16 (no Critical/High/Medium open,
+  tests/build/lint green) until a new concrete finding or user request surfaces.
+
+---
+
+# Loop 007
+
+**Library:** libs/queue
+**Date:** 2026-07-23
+
+## Goal
+
+Following the same-day live-infra verification pattern applied to `libs/auth` (Loop 019) and
+`libs/workflow` (Loop 021), close the analogous gap here: Loop 006's inbox dedup-key collision
+fix (`JSON.stringify([consumerKey, messageId])` instead of string concatenation) was only ever
+verified against in-memory sqlite. `isDuplicateKeyError` explicitly branches on driver-specific
+error codes (`ER_DUP_ENTRY` for MySQL vs. `SQLITE_CONSTRAINT_PRIMARYKEY` for sqlite) — a
+sqlite-only test exercises a different branch of that function than production (MySQL) ever hits.
+
+## Files Reviewed
+
+- No source changes — this loop only adds a test.
+- `inbox/database-queue-inbox.service.ts`'s `withIdempotency` and `inbox/is-duplicate-key-error.ts`
+  (Loop 006's fix), re-read to confirm both are unmodified since Loop 006.
+
+## Problems Found
+
+None — this loop is verification-only, not a review pass.
+
+## Changes Made
+
+- New `inbox/database-queue-inbox.mysql.integration.spec.ts`: reruns Loop 006's collision
+  regression test (`consumerKey="a:b"/messageId="c"` vs. `consumerKey="a"/messageId="b:c"`)
+  against a real `mysql` `DataSource` pointed at the `app_scratch` scratch schema (provisioned
+  for `libs/auth` Loop 019, reused here), plus a second test proving a genuine duplicate delivery
+  of the same `(consumerKey, messageId)` pair is correctly treated as already-processed via a
+  real `ER_DUP_ENTRY` from MySQL's own unique-constraint enforcement, not a mocked
+  `QueryFailedError`. Gated behind `RUN_MYSQL_INTEGRATION_TESTS=1` (`describe.skip` by default,
+  matching `libs/auth`/`libs/workflow`'s companion tests) so `npm test` stays hermetic.
+
+## Why
+
+- Same reasoning as `libs/auth`/`libs/workflow`'s live-verification loops this session: the fix
+  was already correct by inspection, but its correctness specifically depends on a driver-level
+  detail (which error code a real duplicate-key violation actually raises) that an in-memory
+  sqlite datasource cannot exercise, matching ci.loop's own precedent (Loop 007 in
+  `libs/database`) that driver-specific behavior deserves live verification when it's available.
+- Risk: LOW. No production code changed — only a new opt-in test file, reusing infra already
+  provisioned this session.
+
+## Tests
+
+`libs/queue` suite gains 1 spec file / 2 tests (skipped by default). With
+`RUN_MYSQL_INTEGRATION_TESTS=1`: both pass against real MySQL. Full monorepo default suite: 149
+suites / 1194 tests, all passing (4 suites/5 tests skipped by default across this session's
+auth/workflow/queue/ratelimit MySQL/Redis-gated additions).
+
+## Build
+
+PASS (`npm run typecheck`)
+
+## Lint
+
+PASS (`npm run lint`)
+
+## Remaining TODO
+
+- Unchanged: inbox-transaction-scope tradeoff and `TopologyBootstrap`'s long-lived raw connection,
+  each with their own "revisit only if X" condition, none triggered.
+
+## Next Loop
+
+- No Critical/High/Medium findings remain open, and the one previously-implicit live-verification
+  gap for the inbox dedup fix is now closed. `libs/queue` remains at a natural stopping point per
+  Section 16 until a new concrete finding or requirement surfaces.
