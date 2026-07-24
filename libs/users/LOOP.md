@@ -258,3 +258,115 @@ PASS (`npm run lint`)
 ## Next Loop
 
 - None forced. Next work should come from a concrete new requirement.
+
+# Loop 004
+
+**Library:** libs/users
+**Date:** 2026-07-24
+
+## Goal
+
+Fresh Phase 1/2 review pass (`ci.loop` §§1–2) — the first since Loop 003's `@/audit` wiring and
+Loop 002's live verification. Re-read the whole library end to end with no assumption that "already
+live-verified" meant nothing was left, applying the same adversarial standard that turned up real
+gaps in `libs/ratelimit` (Loop 012) and `libs/notification` (Loop 002) this session.
+
+## Files Reviewed
+
+- `application/user-profile.service.ts` — every method, focusing on `updateMine`'s merge logic
+  specifically (the site of Loop 002/Loop-in-`libs/audit` Loop 002's prior `metadata.fields` bug,
+  a strong prior that the same object had more than one bug in it).
+- `domain/user-profile.{entity,repository}.ts`, `domain/is-duplicate-key-error.ts`,
+  `dto/*.ts`, `errors/*.ts`, `users.{module,types,constants}.ts`,
+  `persistence/{entities,migrations}/*` (incl. the seed migration), `http/user-profile.controller.ts`
+  — re-read end to end.
+- Wrote and ran a throwaway empirical test (real `better-sqlite3` `DataSource`, deleted after use,
+  not committed) to confirm exactly what TypeORM's `Repository.save()` does with an object property
+  explicitly set to `undefined`, rather than assuming — this directly determined whether the bug
+  below was a real data-corruption issue or a response-shape-only issue.
+
+## Problems Found
+
+**Medium**
+- `updateMine`'s `await this.profiles.save({ ...profile, ...patch })`: when `patch` is a real
+  `UpdateProfileDto` instance, every declared field is present as an own key set to `undefined` for
+  anything the caller didn't send (the same TS class-field shape that caused `libs/audit`'s Loop 002
+  bug). Object spread copies own keys regardless of value, so `{ ...profile, ...patch }` still
+  overwrote `profile`'s real values with `undefined` for every unsent field, even after Loop 002's
+  fix (which only corrected the audit-metadata bookkeeping, not this merge). Empirically confirmed
+  TypeORM's `save()` correctly skips `undefined`-valued columns in the actual `UPDATE` — the
+  database row itself was never corrupted — but the *object `save()` returns* reflects the merged
+  input, not a fresh read, so `updateMine`'s return value (and therefore the `PATCH /users/me`
+  response body) incorrectly showed every unsent field as `null`. A client updating its local state
+  from the mutation response (rather than re-fetching) would see e.g. `avatarUrl` appear to vanish
+  after changing only `displayName`. Not caught by Loop 002's live verification, which only checked
+  fields it actually sent, never a previously-set field's survival across an unrelated partial
+  update.
+
+**Low**
+- `DEFAULT_MANAGE_OTHERS_PERMISSION` (`users.constants.ts`) was declared and documented but never
+  actually referenced — `UserProfileService`'s constructor used a hardcoded `'users:manage'` string
+  literal instead. Harmless today (both are the same string) but a duplicate-constant drift risk:
+  changing one without the other would silently diverge.
+- `libs/users/ARCH.md` Design 001's Application Layer/Handoff-to-Improvement-Loop sections both
+  name `UserProfileService.deactivate/reactivate(userId, actingUserId)` as in-scope for "the first
+  Improvement Loop," and the `deactivatedAt` column exists in the entity/migration/response DTO —
+  but no such methods, and no HTTP routes for them, were ever built across Loops 001–003, with no
+  ARCH.md note explaining the deferral. `deactivatedAt` is consequently dead schema, always `null`,
+  unreachable by any code path. Flagged, not fixed: unlike the Medium bug above (a narrow,
+  fully-specified correctness fix), building deactivate/reactivate now would mean making several
+  real product decisions ARCH.md never pinned down (does deactivation affect `libs/auth`'s login
+  gate? is a deactivated profile still visible to `getForUser`? what HTTP status/route shape?) —
+  exactly the kind of thing this session's other Design Mode sessions confirmed with the user before
+  building, not something to decide unilaterally mid-review-pass.
+
+## Changes Made
+
+- `updateMine`: filters `patch` to its actually-provided (non-`undefined`) entries *before*
+  merging, so both the object passed to `save()` and the value returned to the caller accurately
+  reflect the profile's real state for every field. `metadata.fields` now reuses that same filtered
+  object's keys instead of re-deriving them separately (also a small simplification).
+- `UserProfileService`'s constructor now imports and uses `DEFAULT_MANAGE_OTHERS_PERMISSION` instead
+  of a duplicate string literal.
+- Two new/updated tests in `user-profile.service.spec.ts`: a new regression test asserting both the
+  exact object passed to `profiles.save()` and the returned value preserve a previously-set field
+  across a partial update that doesn't mention it.
+
+## Why
+
+Per `ci.loop` §17 (never trade correctness for elegance): a `PATCH` response silently misreporting
+unrelated fields as wiped is a real, user-visible correctness bug, not a cosmetic one — the same
+class of "verify empirically, don't assume" discipline this session already applied to the
+`libs/ratelimit`/`libs/notification` fixes (traced into TypeORM's actual `save()` behavior with a
+throwaway test rather than guessing). The dead-constant fix is a mechanical, zero-risk cleanup per
+Section 11. The `deactivate`/`reactivate` gap is documented rather than silently implemented,
+per Section 18's "HIGH changes require explicit justification" — this is a feature-scope decision,
+not a bug fix, and every prior scope decision in this library's ARCH.md was explicitly confirmed
+with the user first.
+
+## Tests
+
+`libs/users` suite: 3 of 3 suites passing, 19 tests (up from 17). Full monorepo `make check`: 159
+of 164 suites passing (5 skipped by design), 1239 tests passing (up from 1238).
+
+## Build
+
+PASS (`npm run typecheck`)
+
+## Lint
+
+PASS (`npm run lint`)
+
+## Remaining TODO
+
+- Unchanged: no admin-facing "list all profiles" endpoint; Organization Management remains the next
+  Design Mode session once a concrete need exists.
+- New: `deactivate`/`reactivate` — ARCH.md-scoped but never built (see Problems Found, Low). Needs
+  a short scope-confirmation (login-gate interaction, visibility-to-others behavior, route shape)
+  before implementing, not a silent addition.
+
+## Next Loop
+
+- No Critical/High findings remain open. `libs/users` returns to a natural stopping point per
+  Section 16 until a new concrete finding or requirement (most likely: the deactivate/reactivate
+  scope confirmation above, or Organization Management) surfaces.

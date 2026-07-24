@@ -123,6 +123,55 @@ describe('UserProfileService', () => {
         }),
       );
     });
+
+    it('does not spread undefined-valued patch fields onto the saved entity, so unsent fields keep their real value', async () => {
+      // Regression test for the bug the previous test's fix didn't fully
+      // cover: `{ ...profile, ...patch }` with an unfiltered `patch` still
+      // overwrites `profile.avatarUrl`'s real value with `undefined` in the
+      // object passed to (and returned by) `save()`, even though TypeORM
+      // itself skips `undefined` columns in the actual UPDATE — so the
+      // *response* a caller sees would incorrectly show a previously-set
+      // field as wiped. Confirmed empirically against a real (sqlite)
+      // TypeORM save() that the DB row itself is untouched; this test
+      // guards the object this service builds and returns.
+      const { service, profiles, audit } = setup();
+      const existing = {
+        userId: 'user-1',
+        displayName: 'Jane',
+        avatarUrl: 'https://example.com/a.png',
+        bio: 'old bio',
+        locale: 'en-US',
+        timezone: 'UTC',
+      };
+      profiles.findByUserId.mockResolvedValue(existing);
+      profiles.save.mockImplementation((entity: unknown) =>
+        Promise.resolve(entity),
+      );
+
+      const updated = await service.updateMine('user-1', {
+        displayName: 'Jane Doe',
+        avatarUrl: undefined,
+        bio: undefined,
+        locale: undefined,
+        timezone: undefined,
+      } as never);
+
+      expect(profiles.save).toHaveBeenCalledWith({
+        userId: 'user-1',
+        displayName: 'Jane Doe',
+        avatarUrl: 'https://example.com/a.png',
+        bio: 'old bio',
+        locale: 'en-US',
+        timezone: 'UTC',
+      });
+      expect(updated).toMatchObject({
+        avatarUrl: 'https://example.com/a.png',
+        bio: 'old bio',
+      });
+      expect(audit.record).toHaveBeenCalledWith(
+        expect.objectContaining({ metadata: { fields: ['displayName'] } }),
+      );
+    });
   });
 
   describe('getForUser', () => {

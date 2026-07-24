@@ -7,7 +7,10 @@ import { UserProfileEntity } from '../domain/user-profile.entity';
 import { isDuplicateKeyError } from '../domain/is-duplicate-key-error';
 import { UserProfileNotFoundError } from '../errors/user-profile-not-found.error';
 import { ForbiddenProfileAccessError } from '../errors/forbidden-profile-access.error';
-import { USERS_MODULE_OPTIONS } from '../users.constants';
+import {
+  DEFAULT_MANAGE_OTHERS_PERMISSION,
+  USERS_MODULE_OPTIONS,
+} from '../users.constants';
 import type { UsersModuleOptions } from '../users.types';
 
 export interface UpdateProfilePatch {
@@ -38,7 +41,7 @@ export class UserProfileService {
     options: UsersModuleOptions,
   ) {
     this.manageOthersPermission =
-      options.manageOthersPermission ?? 'users:manage';
+      options.manageOthersPermission ?? DEFAULT_MANAGE_OTHERS_PERMISSION;
   }
 
   /**
@@ -78,24 +81,35 @@ export class UserProfileService {
     patch: UpdateProfilePatch,
   ): Promise<UserProfileEntity> {
     const profile = await this.getOrCreateMine(userId);
-    const updated = await this.profiles.save({ ...profile, ...patch });
+
+    // Filter to keys whose value was actually provided *before* merging —
+    // `patch` may be a real `UpdateProfileDto` instance, which (per this
+    // project's TS class-field semantics) has every declared field present
+    // as an own key set to `undefined` even when the caller omitted it.
+    // Left unfiltered, `{ ...profile, ...patch }` still spreads those
+    // `undefined` values over `profile`'s real ones: TypeORM's `save()`
+    // correctly skips `undefined` columns in the actual UPDATE (the DB row
+    // itself is never corrupted — confirmed empirically), but the *object
+    // this method returns* would show those fields as null instead of their
+    // real, unchanged value, since it's built from the same merged object.
+    // Confirmed live against real MySQL for the audit-metadata half of this
+    // (see `libs/audit/LOOP.md` Loop 002) — the response-body half wasn't
+    // checked there since that pass only verified fields actually sent.
+    const providedFields = Object.fromEntries(
+      Object.entries(patch).filter(([, value]) => value !== undefined),
+    ) as Partial<UpdateProfilePatch>;
+
+    const updated = await this.profiles.save({
+      ...profile,
+      ...providedFields,
+    });
 
     await this.audit.record({
       actorId: userId,
       action: 'profile.updated',
       targetType: 'user_profile',
       targetId: userId,
-      // `Object.keys(patch)` isn't enough: the controller's DTO instance
-      // has every declared field present as an own key (TS class-field
-      // semantics define each as `undefined` even when the caller didn't
-      // send it), so this filters to keys whose value was actually
-      // provided — confirmed live against real MySQL: sending only
-      // {displayName, bio} was otherwise recorded as all 5 possible fields.
-      metadata: {
-        fields: Object.keys(patch).filter(
-          (key) => patch[key as keyof UpdateProfilePatch] !== undefined,
-        ),
-      },
+      metadata: { fields: Object.keys(providedFields) },
     });
 
     return updated;
