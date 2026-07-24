@@ -1,10 +1,12 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Headers,
   HttpCode,
   Ip,
+  Param,
   Post,
   UseGuards,
 } from '@nestjs/common';
@@ -28,6 +30,7 @@ import { ChangePasswordDto } from '../dto/change-password.dto';
 import { RateLimit } from '@/ratelimit';
 import { RegisterResponseDto } from '../dto/register-response.dto';
 import { AuthSessionResponseDto } from '../dto/auth-session-response.dto';
+import { ActiveSessionResponseDto } from '../dto/active-session-response.dto';
 import { AuthenticatedUserResponseDto } from '../dto/authenticated-user-response.dto';
 import { Public } from '../decorators/public.decorator';
 import { CurrentUser } from '../decorators/current-user.decorator';
@@ -191,6 +194,39 @@ export class AuthController {
   @ApiResponse({ status: 204, description: 'All sessions revoked' })
   async logoutAll(@CurrentUser() user: AuthenticatedUser): Promise<void> {
     await this.auth.logoutAll(user.userId);
+  }
+
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @Get('sessions')
+  @ApiOperation({
+    summary: "List the current user's active sessions/devices",
+  })
+  @ApiResponse({ status: 200, type: [ActiveSessionResponseDto] })
+  listSessions(
+    @CurrentUser() user: AuthenticatedUser,
+  ): Promise<ActiveSessionResponseDto[]> {
+    return this.auth.listSessions(user.userId);
+  }
+
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(204)
+  @Delete('sessions/:id')
+  @ApiOperation({
+    summary: "Revoke one of the current user's sessions/devices",
+  })
+  @ApiResponse({ status: 204, description: 'Session revoked' })
+  @ApiResponse({
+    status: 404,
+    description:
+      'Session does not exist, does not belong to the current user, or is already revoked',
+  })
+  async revokeSession(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+  ): Promise<void> {
+    await this.auth.revokeSession(user.userId, id);
   }
 
   @ApiBearerAuth()

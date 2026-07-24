@@ -10,6 +10,8 @@ describe('AuthController', () => {
       refresh: jest.fn(),
       logout: jest.fn().mockResolvedValue(undefined),
       logoutAll: jest.fn().mockResolvedValue(undefined),
+      listSessions: jest.fn().mockResolvedValue([]),
+      revokeSession: jest.fn().mockResolvedValue(undefined),
       changePassword: jest.fn().mockResolvedValue(undefined),
     };
     const passwordReset = {
@@ -129,6 +131,41 @@ describe('AuthController', () => {
     await controller.logoutAll(user);
 
     expect(auth.logoutAll).toHaveBeenCalledWith('user-1');
+  });
+
+  it('lists active sessions for the current user', async () => {
+    const { controller, auth } = setup();
+    const user: AuthenticatedUser = {
+      userId: 'user-1',
+      email: 'a@example.com',
+      roles: [],
+      permissions: [],
+      jti: 'jti-1',
+      tokenExpiresAt: new Date(),
+    };
+    const sessions = [{ id: 'rt-1' }];
+    auth.listSessions.mockResolvedValue(sessions);
+
+    const result = await controller.listSessions(user);
+
+    expect(auth.listSessions).toHaveBeenCalledWith('user-1');
+    expect(result).toBe(sessions);
+  });
+
+  it('revokes a single session by id for the current user', async () => {
+    const { controller, auth } = setup();
+    const user: AuthenticatedUser = {
+      userId: 'user-1',
+      email: 'a@example.com',
+      roles: [],
+      permissions: [],
+      jti: 'jti-1',
+      tokenExpiresAt: new Date(),
+    };
+
+    await controller.revokeSession(user, 'rt-1');
+
+    expect(auth.revokeSession).toHaveBeenCalledWith('user-1', 'rt-1');
   });
 
   it('returns the authenticated user for /auth/me', () => {

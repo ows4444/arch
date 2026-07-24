@@ -2,7 +2,7 @@
 
 > Reference document for future development. Captures what's built, what's partial, what's planned, and why — so priority calls don't need to be re-derived every session. Reviewed against `ci.loop`'s Design Mode discipline (Section 0): nothing here is scoped to microservices/CQRS/event-sourcing/multi-tenant unless explicitly justified.
 
-**Last updated:** 2026-07-23
+**Last updated:** 2026-07-24
 **Status:** Living document — append/update, don't silently replace. Update the coverage table whenever a library/app changes; add a dated note under "Decision Log" when a prioritization call changes.
 
 ---
@@ -25,7 +25,7 @@ The platform is **infrastructure-first**: seven mature shared libraries and two 
 
 | Module | Where | Missing |
 |---|---|---|
-| Authentication | `libs/auth` | login/logout, refresh tokens, JWT are done. Missing: MFA/2FA, forgot/reset password, device management, API keys, OAuth2, SSO |
+| Authentication | `libs/auth` | login/logout, refresh tokens, JWT, forgot/reset password, email verification, change-password, and device management (list/revoke own active sessions, `LOOP.md` Loop 022, 2026-07-24) are done. Missing: MFA/2FA, API keys, OAuth2, SSO |
 | Authorization | `libs/auth/application/authorization.service.ts` | RBAC only. Missing: policy engine, resource-level/ownership checks, dynamic permissions |
 | Rate limiting | `libs/ratelimit` | limiting itself is done. Missing: API versioning, API docs, API analytics — the rest of a full API-management layer |
 | Health/monitoring | `apps/server/src/health` | liveness/readiness only. Missing: metrics, service-status aggregation, dependency health beyond the basics |
@@ -64,7 +64,7 @@ Risk scale per `ci.loop` §18: LOW / MEDIUM / HIGH / CRITICAL.
 
 | Item | Risk | Why this order |
 |---|---|---|
-| Auth completeness: MFA, forgot/reset password, device management | HIGH (auth surface) | `libs/auth` already exists; this closes a correctness gap rather than opening a new bounded context |
+| Auth completeness: MFA, API keys, OAuth2/SSO (forgot/reset password and device management done, 2026-07-23/24) | HIGH (auth surface) | `libs/auth` already exists; this closes a correctness gap rather than opening a new bounded context |
 | Authorization: policy engine, resource-level/ownership checks | HIGH | Every future domain module (Users, Compliance, ...) will need scoped checks, not just role checks |
 | Audit Module | MEDIUM | Hooks into existing `libs/database` repositories/transactions; no new architecture required |
 | Structured Logging / Observability | MEDIUM | Logs → structured JSON done (2026-07-23, `apps/server/LOOP.md` Loop 005). Remaining: metrics export, trace/span propagation (needs an APM backend choice) |
@@ -150,3 +150,14 @@ Risk scale per `ci.loop` §18: LOW / MEDIUM / HIGH / CRITICAL.
   (both apps booted together for the first time this session; outbox rows confirmed `published`).
   Moves the Notification Service from "Not started" to "Partial" and gives `apps/worker` its first
   real functionality beyond smoke-test scaffolding.
+- **2026-07-23** (retroactive correction) — This doc's Tier 1 "Auth completeness" row and
+  Authentication coverage entry had drifted stale: forgot/reset password and email verification
+  (`libs/auth` Loop 020, same date as this doc's creation) were already implemented before this
+  doc's first version was written, but weren't reflected. Corrected in the same edit as the
+  2026-07-24 entry below rather than as a separate pass.
+- **2026-07-24** — Closed Tier 1's device-management gap (`libs/auth` Loop 022): `deviceId` on
+  refresh tokens (Loop 020) was write-only until now — `GET /auth/sessions` /
+  `DELETE /auth/sessions/:id` let a user list and revoke their own active sessions, self-service
+  only (no admin "manage another user's sessions" surface, since no concrete need for one exists).
+  Auth completeness now only has MFA/2FA, API keys, and OAuth2/SSO open — none with a concrete
+  trigger yet.

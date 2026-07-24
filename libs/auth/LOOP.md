@@ -1956,3 +1956,85 @@ PASS (`npm run lint`)
 
 - No Critical/High/Medium findings open. `libs/auth` remains at a natural stopping point per
   Section 16 until a new concrete finding or requirement surfaces.
+
+# Loop 022
+
+**Library:** libs/auth
+**Date:** 2026-07-24
+
+## Goal
+
+Close REQUIREMENTS.md Tier 1's "device management" gap: `RefreshTokenEntity.deviceId` (Loop 020)
+landed as write-only forensic metadata — recorded on login/refresh, never read back anywhere. This
+loop surfaces it: let a user see and revoke their own active sessions/devices.
+
+## Files Reviewed
+
+- `domain/refresh-token.repository.ts` — `findActiveForUser`/`revokeIfActive` already existed
+  (session-limit eviction, Loop 019/020); neither is scoped to "one session, one caller."
+- `application/refresh-token.service.ts` / `application/auth.service.ts` — existing
+  `logout`/`logoutAll` delegation pattern (thin `AuthService` passthrough to
+  `RefreshTokenService`) reused rather than inventing a new one.
+- `http/auth.controller.ts` — existing `@CurrentUser()` + `JwtAuthGuard` pattern from
+  `logout-all`/`change-password` reused; no new guard/decorator needed since this is
+  self-service-only (no "manage another user's sessions" case exists or was requested).
+
+## Problems Found
+
+N/A — feature addition (closing a documented `REQUIREMENTS.md` gap), not a review pass.
+
+## Changes Made
+
+- `RefreshTokenRepository.revokeIfActiveForUser(id, userId)`: same atomic compare-and-revoke as
+  `revokeIfActive`, additionally scoped to `userId` in the `WHERE` clause — the ownership check and
+  the revoke happen in one statement, so there's no separate read-then-check race window.
+- `RefreshTokenService`: new `ActiveSession` interface (id/createdByIp/userAgent/deviceId/
+  createdAt/expiresAt — deliberately omits `tokenHash`/`familyId`/`userId`/`revokedAt`),
+  `listActiveForUser(userId)`, and `revokeOne(userId, sessionId)` (throws the new
+  `SessionNotFoundError` — a 404 — when the id doesn't exist, doesn't belong to the caller, or is
+  already revoked; all three cases are indistinguishable on purpose, so a 403 never confirms a
+  session id belongs to someone else).
+- `AuthService`: thin `listSessions`/`revokeSession` passthroughs, same shape as existing
+  `logoutAll`.
+- `AuthController`: `GET /auth/sessions` and `DELETE /auth/sessions/:id`, both behind
+  `JwtAuthGuard`, no rate limiting (matches `logout`/`logout-all`/`me` — only the unauthenticated
+  `@Public()` routes are rate-limited).
+- New `ActiveSessionResponseDto` (Swagger mirror, per the existing `AuthSessionResponseDto`
+  pattern) and `SessionNotFoundError`, both exported from the barrel.
+- Tests: unit coverage in `refresh-token.service.spec.ts` (mapping + ownership-scoped revoke) and
+  `auth.service.spec.ts`/`auth.controller.spec.ts` (delegation), plus one new
+  `auth.integration.spec.ts` case against a real (sqlite) DataSource covering the full flow —
+  list two devices, revoke one, confirm the other and a *different user's* session are
+  untouched, confirm cross-user revoke and double-revoke both 404.
+
+## Why
+
+Per `ci.loop` §17 (prefer existing patterns): this is entirely new read/write surface on an
+existing aggregate (`RefreshTokenEntity`), not a new bounded context, so no `ARCH.md` entry — no
+aggregate boundary moved. Scoped to self-service only (no admin "revoke someone else's session"
+endpoint) since no concrete need for that exists yet, consistent with how `libs/users`/`libs/audit`
+each deferred their own admin-facing surface until a concrete trigger appeared.
+
+## Tests
+
+`libs/auth` suite: 19 of 20 suites passing (1 mysql-gated suite skipped, as before), 153 tests (up
+from ~145). Full monorepo `make check`: 159 of 164 suites passing (5 skipped by design), 1234 tests
+passing.
+
+## Build
+
+PASS (`npm run typecheck`)
+
+## Lint
+
+PASS (`npm run lint`)
+
+## Remaining TODO
+
+- REQUIREMENTS.md Tier 1 "Auth completeness" still has MFA/2FA, API keys, OAuth2/SSO open — none
+  have a concrete trigger yet.
+
+## Next Loop
+
+- No Critical/High/Medium findings open. `libs/auth` remains at a natural stopping point per
+  Section 16 until a new concrete finding or requirement surfaces.

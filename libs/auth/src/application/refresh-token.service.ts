@@ -11,6 +11,7 @@ import {
 import type { AuthEventPublisher } from '../ports/auth-event-publisher.interface';
 import type { AuthModuleOptions } from '../auth.types';
 import { TokenRevokedError } from '../errors/token-revoked.error';
+import { SessionNotFoundError } from '../errors/session-not-found.error';
 
 export interface RefreshTokenMetadata {
   createdByIp?: string;
@@ -30,6 +31,26 @@ export interface RotatedRefreshToken {
   userId: string;
 
   refreshToken: IssuedRefreshToken;
+}
+
+/**
+ * Deliberately omits `tokenHash`/`familyId`/`userId`/`revokedAt` — this is
+ * what a "list my devices" endpoint returns to the owning user, not the raw
+ * entity, so it can't leak the hash a stolen response would otherwise let
+ * an attacker correlate against a captured raw token.
+ */
+export interface ActiveSession {
+  id: string;
+
+  createdByIp?: string | null;
+
+  userAgent?: string | null;
+
+  deviceId?: string | null;
+
+  createdAt: Date;
+
+  expiresAt: Date;
 }
 
 @Injectable()
@@ -164,6 +185,35 @@ export class RefreshTokenService {
 
   revokeAllForUser(userId: string): Promise<void> {
     return this.refreshTokens.revokeAllForUser(userId);
+  }
+
+  async listActiveForUser(userId: string): Promise<ActiveSession[]> {
+    const active = await this.refreshTokens.findActiveForUser(userId);
+
+    return active.map((token) => ({
+      id: token.id,
+      createdByIp: token.createdByIp ?? null,
+      userAgent: token.userAgent ?? null,
+      deviceId: token.deviceId ?? null,
+      createdAt: token.createdAt,
+      expiresAt: token.expiresAt,
+    }));
+  }
+
+  /**
+   * Revokes exactly one session by id, scoped to `userId` so a caller can
+   * only ever revoke their own sessions — see
+   * `RefreshTokenRepository.revokeIfActiveForUser`.
+   */
+  async revokeOne(userId: string, sessionId: string): Promise<void> {
+    const revoked = await this.refreshTokens.revokeIfActiveForUser(
+      sessionId,
+      userId,
+    );
+
+    if (!revoked) {
+      throw new SessionNotFoundError(sessionId);
+    }
   }
 
   private hash(rawToken: string): string {

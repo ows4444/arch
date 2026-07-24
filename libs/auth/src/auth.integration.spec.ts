@@ -376,6 +376,63 @@ describe('libs/auth integration (real DataSource)', () => {
     );
   });
 
+  it("lists active sessions and revokes one by id, without touching the others or another user's session", async () => {
+    await authService.register({
+      email: 'oscar@example.com',
+      password: 'correct-horse-battery-staple',
+    });
+    await activate('oscar@example.com');
+    await authService.register({
+      email: 'petra@example.com',
+      password: 'correct-horse-battery-staple',
+    });
+    await activate('petra@example.com');
+
+    const laptop = await authService.login(
+      { email: 'oscar@example.com', password: 'correct-horse-battery-staple' },
+      { deviceId: 'laptop' },
+    );
+    const phone = await authService.login(
+      { email: 'oscar@example.com', password: 'correct-horse-battery-staple' },
+      { deviceId: 'phone' },
+    );
+    const other = await authService.login({
+      email: 'petra@example.com',
+      password: 'correct-horse-battery-staple',
+    });
+
+    const oscar = await userRepo.findByEmail('oscar@example.com');
+    const sessions = await authService.listSessions(oscar!.id);
+    expect(sessions.map((s) => s.deviceId).sort()).toEqual(['laptop', 'phone']);
+    expect(sessions.every((s) => !('tokenHash' in s))).toBe(true);
+
+    const laptopSession = sessions.find((s) => s.deviceId === 'laptop')!;
+
+    // Can't revoke another user's session by id — comes back as if it
+    // didn't exist, not a 403 that would confirm the id belongs to someone.
+    const petra = await userRepo.findByEmail('petra@example.com');
+    await expect(
+      authService.revokeSession(petra!.id, laptopSession.id),
+    ).rejects.toThrow('does not exist');
+
+    await authService.revokeSession(oscar!.id, laptopSession.id);
+
+    await expect(authService.refresh(laptop.refreshToken)).rejects.toThrow(
+      TokenRevokedError,
+    );
+    await expect(
+      authService.refresh(phone.refreshToken),
+    ).resolves.toBeDefined();
+    await expect(
+      authService.refresh(other.refreshToken),
+    ).resolves.toBeDefined();
+
+    // Revoking the same session again 404s instead of silently no-opping.
+    await expect(
+      authService.revokeSession(oscar!.id, laptopSession.id),
+    ).rejects.toThrow('does not exist');
+  });
+
   it('blocks login until the verification token is confirmed, then allows it', async () => {
     await authService.register({
       email: 'grace@example.com',

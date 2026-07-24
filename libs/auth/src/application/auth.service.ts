@@ -6,6 +6,7 @@ import { UserStatus } from '../domain/user-status.enum';
 import { TokenService } from './token.service';
 import {
   RefreshTokenService,
+  type ActiveSession,
   type RefreshTokenMetadata,
 } from './refresh-token.service';
 import { EmailVerificationService } from './email-verification.service';
@@ -154,6 +155,14 @@ export class AuthService {
 
   async logoutAll(userId: string): Promise<void> {
     await this.refreshTokens.revokeAllForUser(userId);
+  }
+
+  listSessions(userId: string): Promise<ActiveSession[]> {
+    return this.refreshTokens.listActiveForUser(userId);
+  }
+
+  revokeSession(userId: string, sessionId: string): Promise<void> {
+    return this.refreshTokens.revokeOne(userId, sessionId);
   }
 
   /**

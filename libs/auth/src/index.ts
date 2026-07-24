@@ -60,6 +60,7 @@ export * from './dto/login.dto';
 export * from './dto/refresh.dto';
 export * from './dto/register-response.dto';
 export * from './dto/auth-session-response.dto';
+export * from './dto/active-session-response.dto';
 export * from './dto/authenticated-user-response.dto';
 export * from './dto/create-role.dto';
 export * from './dto/create-permission.dto';
@@ -104,6 +105,7 @@ export * from './errors/user-not-found.error';
 export * from './errors/password-reset-token-invalid.error';
 export * from './errors/email-verification-token-invalid.error';
 export * from './errors/email-not-verified.error';
+export * from './errors/session-not-found.error';
 
 /*
  * Config

@@ -27,6 +27,8 @@ describe('AuthService', () => {
       rotate: jest.fn(),
       revoke: jest.fn().mockResolvedValue(undefined),
       revokeAllForUser: jest.fn().mockResolvedValue(undefined),
+      listActiveForUser: jest.fn().mockResolvedValue([]),
+      revokeOne: jest.fn().mockResolvedValue(undefined),
     };
     const emailVerification = {
       issue: jest.fn().mockResolvedValue(undefined),
@@ -213,6 +215,27 @@ describe('AuthService', () => {
       await service.logoutAll('user-1');
 
       expect(refreshTokens.revokeAllForUser).toHaveBeenCalledWith('user-1');
+    });
+  });
+
+  describe('listSessions', () => {
+    it('delegates to RefreshTokenService.listActiveForUser', async () => {
+      const { service, refreshTokens } = setup();
+      const sessions = [{ id: 'rt-1' }];
+      refreshTokens.listActiveForUser.mockResolvedValue(sessions);
+
+      await expect(service.listSessions('user-1')).resolves.toBe(sessions);
+      expect(refreshTokens.listActiveForUser).toHaveBeenCalledWith('user-1');
+    });
+  });
+
+  describe('revokeSession', () => {
+    it('delegates to RefreshTokenService.revokeOne', async () => {
+      const { service, refreshTokens } = setup();
+
+      await service.revokeSession('user-1', 'rt-1');
+
+      expect(refreshTokens.revokeOne).toHaveBeenCalledWith('user-1', 'rt-1');
     });
   });
 

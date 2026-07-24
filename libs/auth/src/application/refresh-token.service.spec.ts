@@ -1,5 +1,6 @@
 import { RefreshTokenService } from './refresh-token.service';
 import { TokenRevokedError } from '../errors/token-revoked.error';
+import { SessionNotFoundError } from '../errors/session-not-found.error';
 import type { AuthModuleOptions } from '../auth.types';
 
 describe('RefreshTokenService', () => {
@@ -13,6 +14,7 @@ describe('RefreshTokenService', () => {
       revokeAllForUser: jest.fn().mockResolvedValue(undefined),
       findActiveForUser: jest.fn().mockResolvedValue([]),
       revokeMany: jest.fn().mockResolvedValue(undefined),
+      revokeIfActiveForUser: jest.fn().mockResolvedValue(true),
     };
     const events = {
       publishUserRegistered: jest.fn(),
@@ -250,6 +252,64 @@ describe('RefreshTokenService', () => {
       await service.issue('user-1');
 
       expect(repository.revokeMany).toHaveBeenCalledWith(['rt-1']);
+    });
+  });
+
+  describe('listActiveForUser', () => {
+    it('maps active sessions and strips tokenHash/familyId/userId/revokedAt', async () => {
+      const { service, repository } = setup();
+      const createdAt = new Date('2026-01-01T00:00:00.000Z');
+      const expiresAt = new Date('2026-02-01T00:00:00.000Z');
+      repository.findActiveForUser.mockResolvedValue([
+        {
+          id: 'rt-1',
+          userId: 'user-1',
+          tokenHash: 'super-secret-hash',
+          familyId: 'family-1',
+          revokedAt: null,
+          createdByIp: '1.2.3.4',
+          userAgent: 'test-agent',
+          deviceId: 'device-abc',
+          createdAt,
+          expiresAt,
+        },
+      ]);
+
+      const sessions = await service.listActiveForUser('user-1');
+
+      expect(repository.findActiveForUser).toHaveBeenCalledWith('user-1');
+      expect(sessions).toEqual([
+        {
+          id: 'rt-1',
+          createdByIp: '1.2.3.4',
+          userAgent: 'test-agent',
+          deviceId: 'device-abc',
+          createdAt,
+          expiresAt,
+        },
+      ]);
+    });
+  });
+
+  describe('revokeOne', () => {
+    it('revokes a session owned by the caller', async () => {
+      const { service, repository } = setup();
+
+      await service.revokeOne('user-1', 'rt-1');
+
+      expect(repository.revokeIfActiveForUser).toHaveBeenCalledWith(
+        'rt-1',
+        'user-1',
+      );
+    });
+
+    it('throws SessionNotFoundError when the id does not belong to the caller (or is already revoked)', async () => {
+      const { service, repository } = setup();
+      repository.revokeIfActiveForUser.mockResolvedValue(false);
+
+      await expect(service.revokeOne('user-1', 'rt-other')).rejects.toThrow(
+        SessionNotFoundError,
+      );
     });
   });
 });

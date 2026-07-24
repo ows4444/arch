@@ -26,6 +26,23 @@ export class RefreshTokenRepository extends BaseRepository<RefreshTokenEntity> {
     return (result.affected ?? 0) > 0;
   }
 
+  /**
+   * Same atomic compare-and-revoke as `revokeIfActive`, additionally scoped
+   * to `userId` — the only path a session-revoke-by-id endpoint needs
+   * (see `RefreshTokenService.revokeOne`): a caller revoking someone else's
+   * session id, or their own already-revoked/expired one, both come back
+   * `false` and both are reported identically (a 404), so neither leaks
+   * whether the id belongs to another user.
+   */
+  async revokeIfActiveForUser(id: string, userId: string): Promise<boolean> {
+    const result = await this.update(
+      { id, userId, revokedAt: IsNull() },
+      { revokedAt: new Date() },
+    );
+
+    return (result.affected ?? 0) > 0;
+  }
+
   async revokeFamily(familyId: string): Promise<void> {
     await this.update({ familyId }, { revokedAt: new Date() });
   }
