@@ -869,3 +869,94 @@ PASS (`npm run lint`)
 - No Critical/High/Medium findings remain open, and the one previously-implicit live-verification
   gap for the key-collision fix is now closed. `libs/ratelimit` remains at a natural stopping
   point per Section 16 until a new concrete finding or requirement surfaces.
+
+# Loop 012
+
+**Library:** libs/ratelimit
+**Date:** 2026-07-24
+
+## Goal
+
+Fresh Phase 1/2 review pass (`ci.loop` §§1–2), prompted by returning to this library after
+several loops elsewhere. Re-inspected the whole module with no assumption that "11 prior loops"
+meant nothing was left.
+
+## Files Reviewed
+
+- `application/rate-limiter.service.ts` — the fail-open contract (`consume`'s try/catch) and
+  exactly what it does and doesn't cover.
+- `resolvers/database-rate-limiter-rule.resolver.ts` / `static-rate-limiter-rule.resolver.ts` —
+  the DB-backed rule path Design 007/008 added and actually adopted in `apps/server`.
+- `stores/{memory,redis}-rate-limit.store.ts` (incl. both Lua scripts), `http/rate-limit.guard.ts`,
+  `http/rate-limit.decorator.ts`, `ratelimit.module.ts`, `ratelimit.module.validator.ts`,
+  `domain/rate-limit-rule.{entity,repository}.ts`, all `core/*.interface.ts`, `index.ts` barrel —
+  re-read end to end; no defects found beyond the one below.
+- Existing spec files for each of the above, to confirm what was and wasn't already covered before
+  concluding something was actually missing rather than just untested-but-fine.
+
+## Problems Found
+
+**High**
+- `RateLimiterService.consume` resolves the limiter config
+  (`await this.resolver.resolve(limiterName, context)`) *before* entering the method's fail-open
+  `try`/`catch` — that block only ever wrapped `this.store.consume(...)`. Design 005's whole
+  premise was "an unavailable rate limiter shouldn't take every protected route down"; Design 007
+  then added `DatabaseRateLimiterRuleResolver`, which does its own DB I/O
+  (`RateLimitRuleRepository.findByName`) on every cache-miss/expiry, and Design 008 actually wired
+  `rules.enabled: true` into `apps/server`'s live config. Once that happened, a MySQL connectivity
+  blip during a DB-rule cache miss would throw straight out of `consume()`, uncaught — 5xx'ing
+  every currently rate-limited route (`login`, `register`, `password-reset/*`,
+  `email-verification/*`, `change-password`) even though Redis (the actual store) is completely
+  healthy. No test exercised this: `database-rate-limiter-rule.resolver.spec.ts` never simulated
+  `repository.findByName` throwing, and `rate-limiter.service.spec.ts`'s "fail-open behavior"
+  tests only ever made `store.consume` throw. Neither Design 007 nor 008 called this out as a
+  known gap — it reads as an oversight, not an accepted tradeoff.
+
+## Changes Made
+
+- `DatabaseRateLimiterRuleResolver.resolveOne`: wraps `this.repository.findByName(name)` in a
+  try/catch. On failure, logs (`Logger.error`, same shape as `RateLimiterService`'s own
+  store-failure log) and returns `undefined` **without caching** the failure — letting `resolve()`'s
+  already-existing "no DB row" fallback path (to `StaticRateLimiterRuleResolver`) handle it exactly
+  like a genuine miss. Not caching the failure means the very next request retries the DB rather
+  than being stuck on the static fallback for a full `cacheTtlMs` after the DB has already
+  recovered.
+- Three new tests in `database-rate-limiter-rule.resolver.spec.ts`: falls back instead of throwing
+  on a DB error, doesn't cache the failure (next call retries and can succeed), and the
+  role-scoped lookup path falls back the same way.
+
+## Why
+
+Fixed inside `DatabaseRateLimiterRuleResolver` rather than widening `RateLimiterService`'s
+try/catch to also wrap `resolver.resolve(...)`: the service's catch block builds its synthetic
+"allowed" `RateLimitResult` from `config.limit`/`config.windowMs`, which don't exist yet if
+`resolve()` itself is what failed — wrapping there would need a second, differently-shaped
+fail-open result with no real config in it. `DatabaseRateLimiterRuleResolver.resolve()` already
+has a designed fallback path for "no DB row found"; treating "DB unreachable" as the same case is
+a one-line, design-consistent extension of behavior that already exists, not a new failure-handling
+category. This also means the fix generalizes for free to any future `RateLimiterRuleResolver`
+implementation that becomes I/O-capable — `RateLimiterService` never needs to know.
+
+## Tests
+
+`libs/ratelimit` suite: 8 of 9 suites passing (1 Redis-integration suite skipped by design), 66
+tests (up from 63). Full monorepo `make check`: 159 of 164 suites passing (5 skipped by design),
+1237 tests passing.
+
+## Build
+
+PASS (`npm run typecheck`)
+
+## Lint
+
+PASS (`npm run lint`)
+
+## Remaining TODO
+
+- Unchanged: the role-scoped DB-resolver key collision (Low, deferred pending a trust-model
+  change that hasn't occurred — see Loop 010).
+
+## Next Loop
+
+- No Critical/High findings remain open. `libs/ratelimit` returns to a natural stopping point per
+  Section 16 until a new concrete finding or requirement surfaces.

@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@/database';
 import { RATE_LIMIT_MODULE_OPTIONS } from '../ratelimit.constants';
 import { RateLimiterRuleResolver } from '../core/rate-limiter-rule-resolver.interface';
@@ -35,6 +35,8 @@ interface CacheEntry {
  */
 @Injectable()
 export class DatabaseRateLimiterRuleResolver implements RateLimiterRuleResolver {
+  private readonly logger = new Logger(DatabaseRateLimiterRuleResolver.name);
+
   private readonly cache = new Map<string, CacheEntry>();
 
   constructor(
@@ -72,6 +74,20 @@ export class DatabaseRateLimiterRuleResolver implements RateLimiterRuleResolver 
     return this.fallback.resolve(limiterName, context);
   }
 
+  /**
+   * A DB read failure (e.g. MySQL connectivity blip) here must not
+   * propagate: `RateLimiterService.consume` calls `resolve()` *before* its
+   * own fail-open try/catch (which only guards `RateLimitStore.consume`),
+   * so an uncaught error here would 5xx every rate-limited route — the
+   * exact "an unavailable rate limiter takes down every protected route"
+   * failure mode `failOpen` was built to prevent, just via the rule
+   * resolver's DB instead of the store's Redis. Treating a failed lookup
+   * the same as "no DB row" lets `resolve()`'s existing static-fallback
+   * path (below) handle it — the same degradation a genuinely-missing rule
+   * already gets. Not cached (unlike a real miss): caching a transient
+   * failure for a full `cacheTtlMs` would keep serving the fallback config
+   * after the DB has already recovered.
+   */
   private async resolveOne(
     name: string,
   ): Promise<RateLimiterConfig | undefined> {
@@ -82,7 +98,21 @@ export class DatabaseRateLimiterRuleResolver implements RateLimiterRuleResolver 
       return cached.config;
     }
 
-    const entity = await this.repository.findByName(name);
+    let entity: RateLimitRuleEntity | null;
+
+    try {
+      entity = await this.repository.findByName(name);
+    } catch (error) {
+      this.logger.error({
+        message:
+          'Rate limit rule lookup failed — falling back to static config rather than failing the request',
+        name,
+        error: error instanceof Error ? error.message : String(error),
+      });
+
+      return undefined;
+    }
+
     const config = entity ? this.toConfig(entity) : undefined;
 
     this.cache.set(name, { config, expiresAt: now + this.cacheTtlMs });

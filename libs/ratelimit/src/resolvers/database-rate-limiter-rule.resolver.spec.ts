@@ -118,4 +118,49 @@ describe('DatabaseRateLimiterRuleResolver', () => {
 
     expect(repository.findByName).toHaveBeenCalledTimes(2);
   });
+
+  describe('DB lookup failure', () => {
+    it('falls back to static config instead of throwing when the DB read fails', async () => {
+      const { resolver, repository, fallback } = setup();
+      repository.findByName.mockRejectedValue(new Error('connection lost'));
+      fallback.resolve.mockResolvedValue({ limit: 5, windowMs: 60_000 });
+
+      const result = await resolver.resolve('login');
+
+      expect(fallback.resolve).toHaveBeenCalledWith('login', undefined);
+      expect(result).toEqual({ limit: 5, windowMs: 60_000 });
+    });
+
+    it('does not cache the failure, so the very next call retries the DB', async () => {
+      const { resolver, repository, fallback } = setup();
+      fallback.resolve.mockResolvedValue({ limit: 5, windowMs: 60_000 });
+      repository.findByName.mockRejectedValueOnce(new Error('connection lost'));
+      repository.findByName.mockResolvedValueOnce({
+        name: 'login',
+        limit: 20,
+        windowMs: 30_000,
+        algorithm: null,
+        updatedAt: new Date(),
+      });
+
+      await resolver.resolve('login');
+      const result = await resolver.resolve('login');
+
+      expect(repository.findByName).toHaveBeenCalledTimes(2);
+      expect(result).toEqual({ limit: 20, windowMs: 30_000 });
+    });
+
+    it('also falls back for a role-scoped lookup that fails', async () => {
+      const { resolver, repository, fallback } = setup();
+      repository.findByName.mockRejectedValue(new Error('connection lost'));
+      fallback.resolve.mockResolvedValue({ limit: 100, windowMs: 60_000 });
+
+      const result = await resolver.resolve('login', { role: 'admin' });
+
+      expect(fallback.resolve).toHaveBeenCalledWith('login', {
+        role: 'admin',
+      });
+      expect(result).toEqual({ limit: 100, windowMs: 60_000 });
+    });
+  });
 });
