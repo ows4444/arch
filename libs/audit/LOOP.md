@@ -184,3 +184,90 @@ PASS (`npm run lint`)
 - None forced. `libs/audit` has now been verified at every level this protocol distinguishes: unit
   (mocked), integration (sqlite, real migration/entity round-trip), and live (real MySQL/Redis/
   RabbitMQ, real HTTP, all 9 audited actions confirmed end to end).
+
+# Loop 003
+
+**Library:** libs/audit
+**Date:** 2026-07-24
+
+## Goal
+
+Fresh Phase 1/2 review pass (`ci.loop` §§1–2) — the first since Loop 002's live-verification pass,
+which had already found and fixed one real bug (in `libs/users`, not this library). Re-read the
+whole library and its two consumer wirings end to end with no assumption that "already
+live-verified" meant nothing was left to find, applying the same adversarial standard that turned
+up real gaps in `libs/ratelimit` (Loop 012) and `libs/notification` (Loop 002) this session.
+
+## Files Reviewed
+
+- `application/audit.service.ts`, `domain/audit-entry.entity.ts`, `domain/audit-log.repository.ts`,
+  `audit.module.ts`, `persistence/{entities,migrations}/index.ts`, the migration itself, `index.ts`
+  barrel — re-read end to end.
+- `libs/auth/src/application/authorization.service.ts` — all 8 audited mutation methods, focusing
+  on exactly where `audit.record(...)` is called relative to the primary write, and what happens on
+  a retried/idempotent call.
+- `libs/auth/src/domain/{role,user}.repository.ts` — `addPermission`/`removePermission`/`addRole`/
+  `removeRole`, to understand whether a duplicate grant/assign is a genuine no-op or an error.
+- `libs/auth/src/http/role.controller.ts` — confirmed every route is behind
+  `JwtAuthGuard`+`PermissionsGuard` and consistently forwards `@CurrentUser().userId` as `actorId`.
+- `libs/users/src/application/user-profile.service.ts` — confirmed Loop 002's `metadata.fields` fix
+  is still correctly in place.
+- Existing spec files for all of the above, to confirm what was and wasn't already covered.
+
+## Problems Found
+
+None at Critical/High/Medium. One Low observation, deliberately left unfixed (see Why):
+
+**Low**
+- `grantPermission`/`revokePermission`/`assignRole`/`revokeRole` all sit on top of a join-table
+  write that swallows a duplicate-key error as a no-op (`RoleRepository.addPermission`,
+  `UserRepository.addRole`, etc. — a deliberate idempotency choice, not a bug). But
+  `AuthorizationService` calls `audit.record(...)` unconditionally after that write regardless of
+  whether it was a real state change or a no-op duplicate — so a retried "grant this permission"
+  call that the user already had produces a second `permission.granted` audit-log row, even though
+  nothing actually changed that time.
+
+## Changes Made
+
+None — the Low finding's blast radius doesn't justify a change per `ci.loop` §17/§18: `record()`'s
+documented contract is "called after the primary mutation succeeds" (succeeds = didn't throw), and
+an idempotent no-op genuinely doesn't throw, so the code does exactly what's documented. The
+audit-log row also isn't *wrong* information — it's an honest record that this actor issued this
+request at this time, which has its own audit value (e.g. spotting repeated grant attempts) distinct
+from "did the state actually change." Revisit only if a concrete need to distinguish "real change"
+vs "no-op retry" in the audit trail appears.
+
+## Why
+
+Same discipline as `libs/ratelimit`'s Loop 010 (found a genuinely lower-severity instance of a
+known pattern, correctly left unfixed) and this session's other two review passes (which did find
+and fix real gaps) — the point of a review pass is to look hard, not to manufacture a fix. This
+time, everything checked out against its own documented contract: the "record after mutation, don't
+swallow write failures" design (ARCH.md's explicit, user-confirmed choice) is implemented exactly as
+specified, every one of the 8 `AuthorizationService` call sites forwards `actorId` correctly, every
+route is correctly guarded, and Loop 002's `metadata.fields` fix is still in place.
+
+## Tests
+
+No code changed this loop — full suite not re-run (matches `libs/ratelimit` Loop 010's precedent
+for a review-only pass with no findings requiring a fix).
+
+## Build
+
+Not re-run — no code changed this loop.
+
+## Lint
+
+Not re-run — no code changed this loop.
+
+## Remaining TODO
+
+- Unchanged from Loop 002: no HTTP read endpoint (deliberately deferred until a concrete need to
+  view audit history appears).
+- The Low idempotent-retry duplicate-row observation above — deferred, not forgotten.
+
+## Next Loop
+
+- No Critical/High/Medium findings across three loops, the last two of which were adversarial
+  passes specifically looking for gaps. `libs/audit` remains at a natural stopping point per
+  Section 16 until a new concrete finding or requirement surfaces.
