@@ -21,6 +21,16 @@ import {
 import { DatabaseModule } from '@/database';
 import { NotificationModule, LoggingEmailSender } from '@/notification';
 import {
+  OrganizationsModule,
+  ORGANIZATIONS_TYPEORM_ENTITIES,
+  ORGANIZATIONS_MIGRATIONS,
+} from '@/organizations';
+import {
+  SchedulerModule,
+  SCHEDULER_TYPEORM_ENTITIES,
+  SCHEDULER_MIGRATIONS,
+} from '@/scheduler';
+import {
   OutboxService,
   QueueModule,
   QUEUE_TYPEORM_ENTITIES,
@@ -155,11 +165,18 @@ function validateAuthEnvironment(): AuthEnvironmentSchema {
         ...RATELIMIT_TYPEORM_ENTITIES,
         ...USERS_TYPEORM_ENTITIES,
         ...AUDIT_TYPEORM_ENTITIES,
+        ...ORGANIZATIONS_TYPEORM_ENTITIES,
+        ...SCHEDULER_TYPEORM_ENTITIES,
       ],
 
-      // USERS_MIGRATIONS must come after AUTH_MIGRATIONS: its seed
-      // migration grants `users:manage` to the `admin` role AUTH_MIGRATIONS
-      // creates (see libs/users' SeedUsersManagePermission migration).
+      // USERS_MIGRATIONS/ORGANIZATIONS_MIGRATIONS must come after
+      // AUTH_MIGRATIONS: their seed migrations grant `users:manage`/
+      // `organizations:manage` to the `admin` role AUTH_MIGRATIONS creates
+      // (see libs/users'/libs/organizations' Seed*ManagePermission
+      // migrations). SCHEDULER_MIGRATIONS has no such ordering dependency —
+      // it grants no permission and seeds no role (see
+      // libs/scheduler/ARCH.md, Security Architecture: no HTTP surface, no
+      // RBAC involvement at all).
       migrations: [
         ...AUTH_MIGRATIONS,
         ...QUEUE_MIGRATIONS,
@@ -168,6 +185,8 @@ function validateAuthEnvironment(): AuthEnvironmentSchema {
         ...RATELIMIT_MIGRATIONS,
         ...USERS_MIGRATIONS,
         ...AUDIT_MIGRATIONS,
+        ...ORGANIZATIONS_MIGRATIONS,
+        ...SCHEDULER_MIGRATIONS,
       ],
     }),
 
@@ -300,6 +319,10 @@ function validateAuthEnvironment(): AuthEnvironmentSchema {
     }),
 
     UsersModule.forRoot(),
+
+    OrganizationsModule.forRoot(),
+
+    SchedulerModule.forRoot(),
   ],
   controllers: [AppController, ValidationRuleController, HealthController],
   providers: [AppService],

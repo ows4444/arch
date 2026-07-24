@@ -102,7 +102,9 @@
       "^@/workflow(|/.*)$": "<rootDir>/libs/workflow/src/$1",
       "^@/validation(|/.*)$": "<rootDir>/libs/validation/src/$1",
       "^@/ratelimit(|/.*)$": "<rootDir>/libs/ratelimit/src/$1",
-      "^@/users(|/.*)$": "<rootDir>/libs/users/src/$1"
+      "^@/users(|/.*)$": "<rootDir>/libs/users/src/$1",
+      "^@/organizations(|/.*)$": "<rootDir>/libs/organizations/src/$1",
+      "^@/scheduler(|/.*)$": "<rootDir>/libs/scheduler/src/$1"
     }
   }
 }

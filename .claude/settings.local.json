@@ -15,7 +15,8 @@
       "Bash(break)",
       "Bash(make compose-up *)",
       "Bash(npx nest *)",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(npm rebuild *)"
     ],
     "deny": [
       "Bash(rm -rf *)",

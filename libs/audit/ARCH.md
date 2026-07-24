@@ -216,3 +216,50 @@ replay.
   wired as a call from each of the 8 `AuthorizationService` methods and `UserProfileService.
   updateMine`, plus tests. No HTTP surface, no query method, no second consumer beyond the two
   named.
+
+---
+
+# Design 002
+
+**Library / Bounded Context:** libs/audit
+**Date:** 2026-07-24
+
+## Goal
+
+Record that `libs/organizations` (`OrganizationService`/`MembershipService`, see
+`libs/organizations/ARCH.md` Design 001) has taken a direct dependency on `@/audit`, becoming this
+module's third consumer — the exact trigger Design 001's Open Questions named as the point to
+revisit whether the direct-dependency-per-consumer pattern still holds. Caught as documentation
+drift (this doc still read as if only two consumers existed) during an open-ended docs-vs-code audit,
+not during `libs/organizations`' own build — that library's own ARCH.md already correctly recorded
+the dependency; this entry closes the other side of the same fact.
+
+## Key Decisions (with risk tag)
+
+**LOW**
+- **The direct-dependency-per-consumer pattern is kept, not generalized, despite the third-consumer
+  trigger firing.** Evaluated per Design 001's own stated criterion ("if... the
+  direct-dependency-per-consumer pattern starts feeling repetitive") rather than mechanically
+  reopening it just because a third consumer exists. Three consumers × a constructor injection +
+  one `.record({...})` call per mutation is not meaningfully more repetitive than the same
+  `@InjectRepository`-style DI every library in this monorepo already does routinely — the
+  rejected decorator/enhancer alternative (Design 001, Rejected Alternatives) would trade a few
+  explicit call sites for a new cross-cutting mechanism with no consumer complaining about the
+  current one. Classified LOW (documentation-only correction, no architecture change) per the same
+  reasoning `libs/auth/ARCH.md` Design 006 used for its own after-the-fact correction.
+
+## Rejected Alternatives
+
+- Generalizing to a decorator/enhancer now that a third consumer exists — rejected for the reason
+  above; the trigger firing prompts *evaluation*, not automatic action.
+
+## Open Questions / Future Evolution
+
+- Unchanged from Design 001: a fourth consumer, or any concrete sign the per-consumer pattern is
+  actually causing friction (not just existing), remains the real trigger to revisit.
+
+## Handoff to Improvement Loop
+
+- **Public API surface / Module boundaries:** unchanged — `libs/organizations`' dependency on
+  `@/audit` lives in that library's own module-boundary record (`libs/organizations/ARCH.md`
+  Context Map / Key Decisions MEDIUM #3), not a new surface here.

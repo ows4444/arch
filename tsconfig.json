@@ -85,6 +85,18 @@
       ],
       "@/ratelimit/*": [
         "libs/ratelimit/src/*"
+      ],
+      "@/organizations": [
+        "libs/organizations/src"
+      ],
+      "@/organizations/*": [
+        "libs/organizations/src/*"
+      ],
+      "@/scheduler": [
+        "libs/scheduler/src"
+      ],
+      "@/scheduler/*": [
+        "libs/scheduler/src/*"
       ]
     }
   }

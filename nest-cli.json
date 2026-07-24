@@ -98,6 +98,24 @@
         "tsConfigPath": "libs/users/tsconfig.lib.json"
       }
     },
+    "organizations": {
+      "type": "library",
+      "root": "libs/organizations",
+      "entryFile": "index",
+      "sourceRoot": "libs/organizations/src",
+      "compilerOptions": {
+        "tsConfigPath": "libs/organizations/tsconfig.lib.json"
+      }
+    },
+    "scheduler": {
+      "type": "library",
+      "root": "libs/scheduler",
+      "entryFile": "index",
+      "sourceRoot": "libs/scheduler/src",
+      "compilerOptions": {
+        "tsConfigPath": "libs/scheduler/tsconfig.lib.json"
+      }
+    },
     "worker": {
       "type": "application",
       "root": "apps/worker",
