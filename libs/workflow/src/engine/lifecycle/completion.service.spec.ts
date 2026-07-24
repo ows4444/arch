@@ -37,6 +37,7 @@ function setup() {
   const afterCommitCallbacks: Array<() => Promise<void>> = [];
   const transactionRunner = {
     executeOrJoin: jest.fn((operation: () => unknown) => operation()),
+    isActive: jest.fn(() => true),
     afterCommit: jest.fn((callback: () => Promise<void>) => {
       afterCommitCallbacks.push(callback);
     }),

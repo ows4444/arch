@@ -7,6 +7,7 @@ import { WORKFLOW_TRANSACTION_RUNNER } from '../../constants/workflow.tokens';
 import { WorkflowExecutionState } from '../../models/workflow-execution-state';
 import type { WorkflowTransactionRunner } from '../../ports/workflow-transaction-runner';
 import { ChildWorkflowService } from '../child-workflow/child-workflow.service';
+import { afterCommitOrNow } from '../../shared/utils/after-commit-or-now';
 
 @Injectable()
 export class WorkflowCompletionService {
@@ -79,12 +80,12 @@ export class WorkflowCompletionService {
       // second transaction inside the first). Deferred to afterCommit, the
       // same pattern already used below for the completion event and in
       // ChildWorkflowService's 'retry-child' failure policy.
-      this.transactionRunner.afterCommit?.(() =>
+      await afterCommitOrNow(this.transactionRunner, () =>
         this.children.onChildCompleted(parent, persisted),
       );
     }
 
-    this.transactionRunner.afterCommit?.(() =>
+    await afterCommitOrNow(this.transactionRunner, () =>
       this.publisher.completed(workflow, persisted),
     );
 

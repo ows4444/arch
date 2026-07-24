@@ -5,6 +5,7 @@ import {
   IsNull,
   LessThan,
   LessThanOrEqual,
+  Not,
   Repository,
 } from 'typeorm';
 import { WorkflowStateEntity } from '../entities/workflow-state.entity';
@@ -156,6 +157,23 @@ export class TypeOrmWorkflowStateStore
     return this.repository
       .find({
         where: { status: 'running', stepStartedAt: LessThan(threshold) },
+        ...(limit !== undefined ? { take: limit } : {}),
+      })
+      .then((entities) => entities.map((e) => WorkflowStateMapper.toDomain(e)));
+  }
+
+  async findPendingEffects(
+    olderThanMs: number,
+    limit?: number,
+  ): Promise<WorkflowExecutionState[]> {
+    const threshold = new Date(Date.now() - olderThanMs);
+
+    return this.repository
+      .find({
+        where: {
+          pendingEffect: Not(IsNull()),
+          updatedAt: LessThan(threshold),
+        },
         ...(limit !== undefined ? { take: limit } : {}),
       })
       .then((entities) => entities.map((e) => WorkflowStateMapper.toDomain(e)));

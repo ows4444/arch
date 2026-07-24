@@ -32,9 +32,11 @@ function setup() {
         next: WorkflowExecutionState,
       ): Promise<WorkflowExecutionState> => Promise.resolve(next),
     ),
+    clearPendingEffect: jest.fn().mockResolvedValue(undefined),
   };
   const persistence = { snapshot: jest.fn().mockResolvedValue(undefined) };
   const children = { spawnFanOut: jest.fn().mockResolvedValue(undefined) };
+  const registry = { getAll: jest.fn().mockReturnValue([]) };
 
   const callOrder: string[] = [];
   const transactionRunner = {
@@ -53,6 +55,7 @@ function setup() {
     stateService as never,
     persistence as never,
     children as never,
+    registry as never,
     transactionRunner as never,
   );
 
@@ -62,6 +65,7 @@ function setup() {
     transitions,
     stateService,
     children,
+    registry,
     persistence,
     transactionRunner,
     callOrder,

@@ -69,6 +69,11 @@ export interface WorkflowStateStore {
     limit?: number,
   ): Promise<WorkflowExecutionState[]>;
 
+  findPendingEffects?(
+    olderThanMs: number,
+    limit?: number,
+  ): Promise<WorkflowExecutionState[]>;
+
   deleteCompleted?(
     workflowName?: string,
     workflowVersion?: number,

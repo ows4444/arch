@@ -14,6 +14,7 @@ import { WorkflowRecoveryService } from '../retry/recovery.service';
 import { ChildWorkflowService } from '../child-workflow/child-workflow.service';
 import { WorkflowExecutionOptions } from '../executor/executor';
 import { WorkflowPersistenceService } from '../../persistence/workflow-persistence.service';
+import { afterCommitOrNow } from '../../shared/utils/after-commit-or-now';
 
 @Injectable()
 export class WorkflowLifecycleService {
@@ -45,14 +46,18 @@ export class WorkflowLifecycleService {
       options?.workflowVersion,
     );
 
-    const state = this.stateFactory.create(workflow, initialData, options);
+    const state = {
+      ...this.stateFactory.create(workflow, initialData, options),
+      pendingEffect: { type: 'start-children' as const },
+    };
 
     await this.stateService.insert(state);
     this.logger.started(state);
 
-    this.transactionRunner.afterCommit?.(async () => {
+    await afterCommitOrNow(this.transactionRunner, async () => {
       await this.publisher.started(workflow, state);
       await this.children.startChildren(workflow, state);
+      await this.stateService.clearPendingEffect(state.workflowId);
     });
 
     return {

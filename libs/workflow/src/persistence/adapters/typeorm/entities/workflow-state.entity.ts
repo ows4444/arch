@@ -2,6 +2,7 @@ import { Column, Entity, Index, PrimaryColumn } from 'typeorm';
 import type { WorkflowExecutionState } from '../../../../models/workflow-execution-state';
 import type { WorkflowFailure } from '../../../../models/workflow-failure';
 import type { WorkflowJoinPolicy } from '../../../../models/workflow-join-policy';
+import type { WorkflowPendingEffect } from '../../../../models/workflow-pending-effect';
 import type { WorkflowSignal } from '../../../../models/workflow-signal';
 import type { WorkflowStatus } from '../../../../types/workflow-status';
 
@@ -15,6 +16,7 @@ import type { WorkflowStatus } from '../../../../types/workflow-status';
 @Index(['parentWorkflowId'])
 @Index(['correlationId'])
 @Index(['requiresRecovery', 'retryAt'])
+@Index(['updatedAt'])
 @Entity('workflow_executions')
 export class WorkflowStateEntity {
   @PrimaryColumn()
@@ -97,6 +99,9 @@ export class WorkflowStateEntity {
 
   @Column({ type: 'boolean', nullable: true })
   requiresRecovery?: boolean | null;
+
+  @Column({ type: 'json', nullable: true })
+  pendingEffect?: WorkflowPendingEffect | null;
 
   @Column({ type: 'int', nullable: true, default: 0 })
   recoveryAttempts?: number | null;

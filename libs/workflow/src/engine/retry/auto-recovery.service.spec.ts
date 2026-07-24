@@ -17,6 +17,7 @@ function setup() {
     findExpiredWaitingExecutions: jest.fn().mockResolvedValue([]),
     findSleepingReady: jest.fn().mockResolvedValue([]),
     findWaitingChildrenExecutions: jest.fn().mockResolvedValue([]),
+    findPendingEffectExecutions: jest.fn().mockResolvedValue([]),
     markAsRecoverable: jest.fn().mockResolvedValue(undefined),
   };
   const executor = {
@@ -30,6 +31,16 @@ function setup() {
   const scheduler = { addInterval: jest.fn(), deleteInterval: jest.fn() };
   const children = {
     checkJoinQuorum: jest.fn().mockResolvedValue(false),
+    startChildren: jest.fn().mockResolvedValue(undefined),
+    spawnFanOutFromNames: jest.fn().mockResolvedValue(undefined),
+    cancelChildren: jest.fn().mockResolvedValue(undefined),
+    replayRetryChild: jest.fn().mockResolvedValue(undefined),
+  };
+  const failureService = {
+    scheduleRetryOrCompensation: jest.fn().mockResolvedValue(undefined),
+  };
+  const stateService = {
+    clearPendingEffect: jest.fn().mockResolvedValue(undefined),
   };
   const metrics = {
     sweepRecovered: jest.fn(),
@@ -37,6 +48,7 @@ function setup() {
     sweepExpiredCancelled: jest.fn(),
     sweepSleepWoken: jest.fn(),
     sweepStuckJoinResumed: jest.fn(),
+    sweepPendingEffectsReplayed: jest.fn(),
   };
 
   const service = new WorkflowAutoRecoveryService(
@@ -45,6 +57,8 @@ function setup() {
     registry as never,
     scheduler as never,
     children as never,
+    failureService as never,
+    stateService as never,
     metrics as never,
   );
 
@@ -55,6 +69,8 @@ function setup() {
     registry,
     scheduler,
     children,
+    failureService,
+    stateService,
     metrics,
   };
 }

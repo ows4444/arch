@@ -38,6 +38,14 @@ export interface WorkflowMetrics {
 
   sweepStuckJoinResumed(count: number): void;
 
+  /**
+   * Optional for the same reason as `compensationFailed?` — fires when the
+   * recovery sweep replays a `WorkflowPendingEffect` marker left behind by
+   * an `afterCommit` callback that never confirmed running (e.g. a process
+   * crash between commit and the callback executing).
+   */
+  sweepPendingEffectsReplayed?(count: number): void;
+
   retentionDeleted(count: number): void;
 
   retentionArchived(count: number): void;

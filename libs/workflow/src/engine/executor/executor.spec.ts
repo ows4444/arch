@@ -35,6 +35,14 @@ function setup() {
     wake: jest.fn(),
     resumeJoin: jest.fn(),
     findByParentWorkflowId: jest.fn(),
+    setPendingEffect: jest.fn(
+      (
+        state: WorkflowExecutionState,
+        pendingEffect: unknown,
+      ): Promise<WorkflowExecutionState> =>
+        Promise.resolve({ ...state, pendingEffect } as WorkflowExecutionState),
+    ),
+    clearPendingEffect: jest.fn().mockResolvedValue(undefined),
   };
   const failureService = { failExecution: jest.fn(), handleFailure: jest.fn() };
   const idempotency = { release: jest.fn() };
@@ -246,7 +254,10 @@ describe('WorkflowExecutor', () => {
 
       expect(children.cancelChildren).toHaveBeenCalledWith(
         { metadata: { name: 'test-workflow' } },
-        cancelled,
+        { ...cancelled, pendingEffect: { type: 'cancel-children' } },
+      );
+      expect(stateService.clearPendingEffect).toHaveBeenCalledWith(
+        cancelled.workflowId,
       );
     });
   });

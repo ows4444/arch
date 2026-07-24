@@ -14,6 +14,7 @@ import { WorkflowStateValidator } from './validator';
 import { WorkflowExecutionError } from '../../errors/workflow.errors';
 import { WorkflowLeaseService } from '../../infrastructure/lease/lease.service';
 import { WorkflowExecutionState } from '../../models/workflow-execution-state';
+import { WorkflowPendingEffect } from '../../models/workflow-pending-effect';
 import { WorkflowLogger } from '../../observability/logger';
 import { WorkflowHistoryService } from '../../persistence/history.service';
 import type { WorkflowIdempotencyStore } from '../../ports/workflow-idempotency-store';
@@ -210,6 +211,39 @@ export class WorkflowStateService {
     return this.transactionRunner.execute(() =>
       this.store.save(previous, versioned),
     );
+  }
+
+  /**
+   * Persists a `WorkflowPendingEffect` marker before a caller defers a side
+   * effect to `afterCommit` — see `WorkflowPendingEffect`. Must be called
+   * while still inside the same transaction as the state change the effect
+   * originates from, so a crash before the deferred callback runs leaves a
+   * durable record for `WorkflowAutoRecoveryService`'s sweep to replay.
+   */
+  async setPendingEffect(
+    state: WorkflowExecutionState,
+    effect: WorkflowPendingEffect,
+  ): Promise<WorkflowExecutionState> {
+    return this.save(state, { ...state, pendingEffect: effect });
+  }
+
+  /**
+   * Clears a `WorkflowPendingEffect` marker once the deferred side effect
+   * has actually run (successfully, or having permanently given up) — a
+   * standalone, best-effort write outside the originating transaction.
+   * Reloads the current row rather than trusting a caller-held reference:
+   * the deferred effect itself may have already saved the same execution
+   * (e.g. resetting a retried child), advancing `stateVersion` past what
+   * the caller last saw.
+   */
+  async clearPendingEffect(workflowId: string): Promise<void> {
+    const latest = await this.load(workflowId);
+
+    if (!latest?.pendingEffect) {
+      return;
+    }
+
+    await this.save(latest, { ...latest, pendingEffect: undefined });
   }
 
   async findByParentWorkflowId(

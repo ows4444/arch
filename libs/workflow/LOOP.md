@@ -2102,3 +2102,546 @@ PASS (`npm run lint`)
   "piecemeal vs. uniform" concern about this specific call is resolved. The broader durability
   question (Loop 013) is still open and is the better next target than further piecemeal fixes here.
   lower-priority, purely organizational follow-up.
+
+---
+
+# Loop 017
+
+**Library:** libs/workflow
+**Date:** 2026-07-22
+
+## Goal
+
+Close the broader `afterCommit` durability gap Loops 013–016 repeatedly named and deferred as a
+Design Mode question: a process crash between a state change's commit and its deferred
+`afterCommit` callback running silently drops that side effect, with no record it was ever due.
+Direct user request to fix all affected call sites in one pass, not just the highest-severity one.
+
+## Files Reviewed
+
+- Every `afterCommit?.(...)` call site in the engine: `lifecycle.service.ts` (`create`),
+  `step-persistence.ts` (`completeStep`'s fan-out spawn), `executor.ts` (`cancel`, `signal`),
+  `child-workflow.service.ts` (`onChildFailed`'s `'ignore'`/`'retry-child'` cases),
+  `completion.service.ts` (`onChildCompleted`, `publisher.completed`), `state/service.ts`
+  (`cancelInternal`'s publisher calls), `failure.service.ts` (publish + retry/compensation
+  scheduling).
+- `engine/retry/auto-recovery.service.ts` / `recovery.service.ts` — the existing sweep
+  infrastructure, particularly the "waitingOnChildren" backstop Loop 013-era work added
+  specifically for `checkJoinQuorum`, to see what was already covered.
+- `persistence/adapters/typeorm/entities/workflow-state.entity.ts`,
+  `mappers/workflow-state.mapper.ts`, `stores/typeorm-workflow-state.store.ts`,
+  `persistence/workflow-database-persistence.module.ts` /
+  `workflow-persistence.module.ts` — confirmed both persistence backends (`'typeorm'` and
+  `'database'`) share the exact same `TypeOrmWorkflowStateStore`/entities/migrations (only the
+  transaction-runner implementation differs), so only one schema/store change was needed, not two.
+- `models/workflow-child-spawn-spec.ts`, `child-workflow.service.ts`'s `spawnFanOut`/`startChildren` —
+  confirmed both call `WorkflowExecutor.execute`/`.cancel`, i.e. open a *second* transaction, which is
+  the actual reason these are deferred to `afterCommit` in the first place (not an oversight) — so the
+  fix couldn't just "not defer it," it needed a durable marker.
+
+## Problems Found
+
+**High**
+- Five `afterCommit` call sites had no crash backstop at all: `create()`'s `startChildren` (declared
+  auto-start children silently never start), `completeStep`'s `spawnFanOut` (fan-out children never
+  spawn), `executor.cancel()`'s `cancelChildren` (children of a cancelled parent orphaned, running
+  forever), `onChildFailed`'s `'retry-child'` case (`retryChild()` never runs — a retriable child
+  failure becomes permanent with no trace a retry was due), `failExecution`'s retry/compensation
+  scheduling (the single most severe case: a top-level workflow that should retry after failure
+  instead sits permanently `'failed'`, silently, forever).
+- One call site was *already* covered and needed no fix: `checkJoinQuorum` (from `onChildCompleted`
+  and the `'ignore'` failure policy) is re-evaluated by the existing "waitingOnChildren" sweep for any
+  parent still `'waiting-children'` — Loop 013-era work already solved this one.
+- The remaining call sites (`publisher.started/completed/failed/expired/cancelled/signalled`,
+  `signalProcessor.complete`) are event-only — a dropped callback there is a missed notification, not
+  a stuck workflow, so left alone; adding durability there would be scope creep with no correctness
+  payoff.
+
+## Changes Made
+
+- `models/workflow-pending-effect.ts` (new): `WorkflowPendingEffect` discriminated union — one variant
+  per unprotected call site above. `spawn-fan-out`'s specs are the child workflow's registered *name*
+  (string), not `WorkflowChildSpawnSpec`'s `Type<unknown>` class reference — a class reference isn't
+  JSON-serializable, and `WorkflowExecutor.execute` already accepts a plain name.
+- `models/workflow-execution-state.ts`: added `pendingEffect?: WorkflowPendingEffect`.
+- `persistence/adapters/typeorm/entities/workflow-state.entity.ts` /
+  `mappers/workflow-state.mapper.ts`: mapped the new field (JSON column, nullable); added an
+  `updatedAt` index backing the sweep's staleness query.
+- `persistence/adapters/typeorm/migrations/1752600000000-WorkflowPendingEffect.migration.ts` (new):
+  adds the column + index; registered in `migrations/index.ts`'s `WORKFLOW_MIGRATIONS`.
+- `ports/workflow-state-store.ts` / `typeorm-workflow-state.store.ts`: added optional
+  `findPendingEffects(olderThanMs, limit)` — `pendingEffect IS NOT NULL AND updatedAt < threshold`.
+- `constants/workflow.constants.ts`: `DEFAULT_PENDING_EFFECT_GRACE_MS` (2 minutes) — how long a marker
+  sits unconfirmed before the sweep treats it as dropped rather than still in-flight (generous enough
+  to clear `retry-child`'s real backoff wait under normal conditions).
+- `engine/state/service.ts`: `WorkflowStateService.setPendingEffect(state, effect)` (must be called
+  inside the same transaction as the state change the effect originates from) and
+  `clearPendingEffect(workflowId)` — the latter takes an id and reloads rather than trusting a
+  caller-held state reference, since the deferred effect itself may have already saved the same
+  execution (e.g. `retryChild` resetting a child), advancing `stateVersion` past what the caller last
+  saw.
+- `lifecycle.service.ts`, `step-persistence.ts`, `executor.ts`, `child-workflow.service.ts`,
+  `failure.service.ts`: each of the five call sites now sets the matching marker (same transaction as
+  the state change) before deferring, and clears it once the deferred effect actually runs.
+- `child-workflow.service.ts`: added `spawnFanOutFromNames` (fan-out replay from persisted
+  name+input, not `Type<unknown>`) and `replayRetryChild` (re-resolves parent/definition from current
+  state rather than trusting anything captured at marker-write time — `retryChild` itself is already
+  idempotent, a no-op once the child is no longer `'failed'`). Deliberately not unified with
+  `spawnFanOut`/the live `retryChild` call into one shared helper — matches this file's own existing
+  precedent (`spawnFanOut`'s docstring already declines to unify with `startChildren` for the same
+  reason): the two paths differ in how they resolve a target and in failure semantics, and forcing one
+  abstraction over both seemed more likely to obscure than help.
+- `failure.service.ts`: extracted `scheduleRetryOrCompensation(workflow, state)` out of
+  `failExecution`'s `afterCommit` closure so the sweep can invoke the identical logic.
+- `engine/retry/recovery.service.ts`: `findPendingEffectExecutions` wrapper, same shape as the other
+  `find*` methods on this class.
+- `engine/retry/auto-recovery.service.ts`: sweep step — for each stale pending-effect execution,
+  dispatches on `effect.type` to the matching replay call, then clears the marker; wrapped in the same
+  per-item try/catch pattern the rest of `recover()` already uses (one execution's replay failure
+  doesn't block the rest of the sweep). Injects `WorkflowFailureService`/`WorkflowStateService`
+  (already provided in the same module — no new circular-DI edge).
+- `models/workflow-metrics.ts` / `observability/noop-metrics.service.ts`: added
+  `sweepPendingEffectsReplayed?(count)` — **optional**, matching the precedent already set by
+  `compensationFailed?`, since `WorkflowMetrics` is a real external interface
+  (`@ows4444/nest-workflow`) and a required new method would break every existing custom
+  implementation.
+
+## Why
+
+Per Section 18, this touches workflow semantics and schema — properly a HIGH-risk change requiring
+explicit justification. Confirmed scope with the user via `AskUserQuestion` before touching any
+schema (options were: full fix, worst-case-only, or design-only) — user chose the full fix across all
+five sites rather than partial coverage.
+
+Design choice (durable marker + sweep replay, reusing the existing `WorkflowAutoRecoveryService`
+interval rather than inventing new scheduling infrastructure) mirrors `libs/queue`'s outbox pattern
+already established in this monorepo, applied to workflow lifecycle side effects instead of message
+publishing — consistent with Section 17's "prefer existing patterns over inventing new ones."
+
+**Known accepted tradeoff, not fixed this loop:** `start-children` and `spawn-fan-out` replay are
+naturally idempotent for the case that matters (a fully-dropped callback — nothing was created, sweep
+creates it). But if the *original* callback partially ran (some children created) and then crashed
+before the marker was cleared, replay has no per-child dedup key and could create an extra duplicate
+child. Making that dedup-safe would require a new idempotency-key primitive threaded through child
+creation — a real, separate change. `cancel-children`/`retry-child`/`schedule-retry-or-compensation`
+have no such gap: each is naturally idempotent (checks the target's current status before acting), so
+replay is always safe there. The duplicate-child window is a crash-during-a-microsecond-callback *and*
+a concurrent sweep race — both would have to happen together — traded deliberately against the
+alternative (declared children silently never spawning at all, today's actual behavior), and is
+strictly better than the status quo even with the gap open.
+
+## Tests
+
+`libs/workflow` suite: 48 spec files / 454 tests, all passing (updated 6 existing tests across
+`lifecycle.service.spec.ts`, `executor.spec.ts`, `child-workflow.service.spec.ts`,
+`failure.service.spec.ts`, `step-persistence.spec.ts`, `auto-recovery.service.spec.ts`,
+`1752000000000-InitialWorkflowSchema.migration.spec.ts` to account for the new field/mocks/migration
+— no net change in test count, this loop extended existing coverage rather than adding new spec
+files). Full monorepo suite: 135 suites / 1054 tests, all passing.
+
+## Build
+
+PASS (`npm run typecheck`; also explicitly verified `npx nest build server` and
+`npx nest build worker` both compile clean)
+
+## Lint
+
+PASS (`npm run lint`)
+
+## Remaining TODO
+
+- The duplicate-child-on-replay tradeoff noted above (`start-children`/`spawn-fan-out` only) — would
+  need a per-child idempotency key threaded through `WorkflowExecutor.execute`/`ChildWorkflowService`
+  to close fully. Not attempted this loop; flagged as a real gap, not silently ignored.
+- `ChildWorkflowService`'s SRP split remains a lower-priority organizational follow-up (unchanged from
+  Loop 016 — this is the seventh loop in a row to touch this file).
+- This loop was verified statically (typecheck/lint/full unit suite/both app builds) but not against
+  live MySQL — no test exercises an actual process crash mid-`afterCommit`, since that's inherently
+  hard to simulate in a unit suite. The sweep's replay logic is unit-tested at the dispatch level
+  (`auto-recovery.service.spec.ts`), not end-to-end against a real crash.
+
+## Next Loop
+
+- No further Critical/High findings on this specific durability question. A natural next candidate
+  (not forced): the idempotency-key gap above, if duplicate children under the narrow crash-plus-race
+  window becomes a real concern rather than a documented tradeoff.
+
+---
+
+# Loop 018
+
+**Library:** libs/workflow
+**Date:** 2026-07-22
+
+## Goal
+
+Close the one accepted tradeoff Loop 017 left open: `start-children`/`spawn-fan-out` replay had
+no per-child idempotency key, so a crash mid-callback after some (not all) children were created
+could duplicate a child on replay.
+
+## Files Reviewed
+
+- `engine/child-workflow/child-workflow.service.ts` (`startChildren`, `spawnFanOut`,
+  `spawnFanOutFromNames`)
+- `engine/executor/executor.ts` (`WorkflowExecutionOptions`, `execute`)
+- `engine/state/factory.ts` (`WorkflowStateFactory.create`)
+- `errors/workflow.errors.ts` (`WorkflowConcurrencyError` — already thrown by
+  `TypeOrmWorkflowStateStore.insert` on a duplicate primary key, confirmed in Loop 002's original
+  wiring)
+
+## Problems Found
+
+**High**
+- (the one named in Loop 017's "Known accepted tradeoff" — no new defect, closing a known gap)
+
+## Changes Made
+
+- `executor.ts`: `WorkflowExecutionOptions` gained an optional `workflowId` — overrides the
+  generated one.
+- `state/factory.ts`: `WorkflowStateFactory.create` uses `options?.workflowId ?? randomUUID()`
+  instead of always generating fresh.
+- `child-workflow.service.ts`: new private `spawnIdempotently(name, input, workflowId, options)` —
+  calls `executor.execute` with a caller-supplied deterministic `workflowId`; on
+  `WorkflowConcurrencyError` (duplicate primary key), loads the existing execution and returns it
+  in place of throwing, rather than creating a duplicate.
+  - `startChildren`: deterministic id = `` `${state.workflowId}:start:${childName}` `` (one child
+    per class is the only valid `onStart` shape, so class name alone is a stable key).
+  - `spawnFanOut`/`spawnFanOutFromNames`: deterministic id =
+    `` `${state.workflowId}:${state.joinId}:${index}` `` — the array index disambiguates multiple
+    specs of the *same* child class in one fan-out episode (a real, tested case — two specs of the
+    same class with different `input` must both still spawn). Index ordering is preserved through
+    the `WorkflowPendingEffect` JSON round-trip, so a replay computes the identical id as the
+    original attempt for the same spec position.
+
+## Why
+
+Direct user follow-up to close the gap Loop 017 explicitly flagged rather than silently left. The
+deterministic-id-plus-duplicate-catch approach was chosen over adding a new schema
+field/idempotency-key column: `TypeOrmWorkflowStateStore.insert` already throws
+`WorkflowConcurrencyError` on a primary-key collision, so reusing the *existing* primary key as the
+dedup mechanism needed no migration, no new column, and no new store method — smaller diff, same
+correctness guarantee. Considered a `startChildren`-style "check existing children before
+creating" approach instead, but rejected it: `spawnFanOut`'s own test suite already covers
+same-class-different-input fan-out as a legitimate case (two specs of `ChildWorkflowClass` with
+different `branch` values), which a class-name-based existence check would have incorrectly
+treated as a duplicate.
+
+## Tests
+
+4 new tests in `child-workflow.service.spec.ts`: `startChildren` gets one asserting the
+deterministic `workflowId` shape and one asserting duplicate-key collision is a no-op (no cancel,
+no `parentFailureHandler.failExecution`); `spawnFanOut` gets the equivalent pair, including the
+index-scoped id for two same-class specs. `libs/workflow` suite: 48 spec files / 458 tests, all
+passing (up from 454). Full monorepo suite: 135 suites / 1058 tests, all passing.
+
+## Build
+
+PASS (`npm run typecheck`; also explicitly verified `npx nest build server` and
+`npx nest build worker` both compile clean)
+
+## Lint
+
+PASS (`npm run lint`)
+
+## Remaining TODO
+
+- None outstanding for this library.
+
+## Next Loop
+
+- No Critical/High findings remain open. This closes the last item from Loop 017 — next loop
+  would be a fresh Phase 1/2 pass on another library, or a Design Mode session if scope is being
+  deliberately extended.
+
+---
+
+# Loop 019
+
+**Library:** libs/workflow
+**Date:** 2026-07-23
+
+## Goal
+
+Fresh adversarial Phase 1/2 pass. Traced `WorkflowExecutor`'s five entry points that call
+`WorkflowRunner.run()` (`execute`, `resume`, `wake`, `resumeJoin`, `signal`) end to end against
+`WorkflowTransactionRunner`'s actual `execute`/`executeOrJoin`/`isActive` semantics, rather than
+re-verifying already-tested step-level logic in isolation.
+
+## Files Reviewed
+
+- `engine/executor/executor.ts` (all five entry points), `engine/executor/runner.ts` (`run()`'s
+  `while (state.currentStep)` loop and its break conditions).
+- `persistence/adapters/typeorm/stores/typeorm-workflow-transaction-runner.ts` and
+  `persistence/adapters/database/database-workflow-transaction-runner.ts` (both
+  `WorkflowTransactionRunner` implementations) — confirmed `execute()`/`executeOrJoin()` both
+  resolve to "join if already active, else open fresh" in both backends, and that `afterCommit()`
+  throws if called with no active transaction.
+- `engine/lifecycle/lifecycle.service.ts` (`create`), `engine/lifecycle/failure.service.ts`
+  (`failExecution`), `engine/lifecycle/completion.service.ts` (`completeIfFinished`),
+  `engine/child-workflow/child-workflow.service.ts` (`onChildFailed`'s `'ignore'`/`'retry-child'`
+  cases), `engine/executor/step-persistence.ts` (`completeStep`) — every `afterCommit()` call
+  site in the engine, to determine which ones sit inside the same `executeOrJoin` frame as the
+  write they defer past (safe) vs. which run afterward, relying on some *other* still-active
+  transaction to attach to (broken once that other transaction is removed).
+- `engine/executor/executor.spec.ts` — confirmed `transactionRunner` is mocked as a trivial
+  passthrough (`execute: (op) => op()`), so this class of bug is invisible to the unit suite; only
+  `public/workflow-retry.integration.spec.ts` (real `better-sqlite3` + real `WorkflowModule`)
+  could have caught it, and that test only exercises a single-step workflow.
+
+## Problems Found
+
+**High**
+- `WorkflowExecutor.execute()`/`resume()`/`wake()`/`resumeJoin()`/`signal()` each wrapped their
+  call to `WorkflowRunner.run()` in one outer `transactionRunner.execute()`/`executeOrJoin()`
+  call. `run()`'s loop processes steps sequentially until one pauses (`waitForSignal`/`sleepUntil`/
+  `spawnChildren`) or the workflow completes — for any straight-line workflow with no waits, one
+  `resume()`/`execute()` call can process many steps in a single pass. Every per-step persistence
+  call (`WorkflowStepPersistenceService.startStep`/`completeStep`, `WorkflowLifecycleService.create`,
+  `WorkflowFailureService.failExecution`, etc.) reaches `transactionRunner.executeOrJoin`, which —
+  confirmed in both transaction-runner implementations — just runs inline once a transaction is
+  already active, joining the outer one instead of committing independently. Net effect: all of a
+  multi-step pass's state+history writes shared one still-open transaction, instead of one
+  transaction per step. Consequences: (1) a DB connection/transaction held open across the combined
+  duration of every step's handler execution in the pass — a real connection-pool/lock-duration
+  risk; (2) every `afterCommit`-deferred side effect from an early step (child spawning, retry
+  scheduling, lifecycle event publishing) didn't actually fire until the *entire* pass's
+  transaction committed, not shortly after the step that scheduled it — directly contradicting the
+  "fires once genuinely durable" guarantee `WorkflowPendingEffect` (Loop 017/018) was built around;
+  (3) a crash mid-pass would roll back every step that pass had already run, not just the one that
+  failed. Not a contrived edge case — this is the ordinary path for any multi-step workflow with no
+  waits between steps. Undetected by 18 prior loops because the unit suite mocks
+  `transactionRunner` as a no-op passthrough and the one real integration test only covers a
+  single-step workflow.
+
+## Changes Made
+
+- `engine/executor/executor.ts`: removed the outer `transactionRunner.execute()`/`executeOrJoin()`
+  wrap from `execute()`, `resume()`, `wake()`, `resumeJoin()`, and `signal()` — each now calls
+  `lifecycle.create()`/`.resume()`, `runner.run()`, and the failure/finalize path directly, letting
+  every inner persistence call manage its own transaction via its own `executeOrJoin`. The
+  failed/pendingError deferred-throw pattern (needed previously so the outer transaction would
+  still commit after recording a failure) is no longer needed — `throw error` directly is now
+  correct, since `failureService.failExecution`/`handleFailure` already commits the failure state
+  independently before the throw propagates. `signal()`'s post-`run()` `afterCommit` registration
+  (for `signalProcessor.complete()`/`publisher.signalled()`) became a direct sequential call, since
+  by that point every step in the pass (and `signalProcessor.prepare()`, which commits itself) has
+  already committed independently — nothing is left to defer.
+- New `shared/utils/after-commit-or-now.ts`: `afterCommitOrNow(runner, operation)` — defers via
+  `runner.afterCommit()` when a transaction is still active (e.g. a caller-supplied ambient
+  transaction the preceding write had to join rather than commit on its own), or runs `operation`
+  immediately (awaited) when none is active, since in that case the write it was meant to follow
+  has already committed independently.
+- Updated the four `afterCommit()` call sites that sit *after* their relevant write's own
+  `executeOrJoin` frame (not inside it) to use `afterCommitOrNow` instead of a bare
+  `transactionRunner.afterCommit?.()`: `lifecycle.service.ts`'s `create()`, `failure.service.ts`'s
+  `failExecution()`, `completion.service.ts`'s `completeIfFinished()` (both call sites), and
+  `child-workflow.service.ts`'s `onChildFailed()` (`'ignore'` and `'retry-child'` cases). Two other
+  `afterCommit()` call sites — `executor.ts`'s `cancel()` and `step-persistence.ts`'s
+  `completeStep()` — sit *inside* the same `executeOrJoin` frame as their write and were left
+  unchanged; they were never broken by this bug.
+- New integration test in `public/workflow-retry.integration.spec.ts`: a real two-step workflow
+  (`better-sqlite3`, real `WorkflowModule.forRoot({ persistence: 'typeorm' })`) whose second step
+  asserts `transactionRunner.isActive()` is `false` and that the workflow's persisted history
+  already has both of the first step's rows — proving each step commits independently rather than
+  the whole pass sharing one transaction. This is the only test in the suite that exercises the
+  real `TypeOrmWorkflowTransactionRunner`'s `isActive()`/`executeOrJoin` semantics rather than a
+  mock.
+- Extended four spec files' `transactionRunner` mocks (`lifecycle.service.spec.ts`,
+  `failure.service.spec.ts`, `completion.service.spec.ts`, `child-workflow.service.spec.ts`) with
+  `isActive: jest.fn(() => true)`, so their existing "afterCommit defers, test flushes manually"
+  assertions keep exercising the deferred branch of `afterCommitOrNow` unchanged.
+
+## Why
+
+Direct instance of the workflow/queue-semantics + concurrency risk category ci.loop §18 flags as
+HIGH — confirmed with the user via `AskUserQuestion` before touching anything, consistent with
+how Loop 017 handled an equally deep transaction-semantics question in this same library. The
+`afterCommitOrNow` design (rather than unconditionally calling every deferred operation directly)
+specifically preserves the one legitimate reason these methods still accept
+`transactionRunner.executeOrJoin` internally: a host application calling `WorkflowClient.execute()`/
+`.resume()`/etc. from within its *own* already-active `@Transactional()` context, where the
+workflow's own writes correctly join that ambient transaction and genuinely need to wait for it to
+commit before firing side effects — a case this loop verified is real (it's the entire reason
+`executeOrJoin` exists as distinct from `execute`) and confirmed still works via the `isActive():
+true` mock path in the four updated spec files.
+
+## Tests
+
+`libs/workflow` suite is now 48 spec files / 460 tests (up from 458 — one new integration test file
+extended, no new spec files). Full monorepo suite: 145 suites / 1174 tests, all passing. Also
+explicitly verified `npx nest build server` and `npx nest build worker` both compile clean.
+
+## Build
+
+PASS (`npm run typecheck`; `npx nest build server`/`npx nest build worker` both compile clean)
+
+## Lint
+
+PASS (`npm run lint`)
+
+## Remaining TODO
+
+- No `ARCH.md` update needed — this is a bug fix to existing documented behavior (per-step
+  atomicity, `afterCommit` firing once genuinely durable), not a change to the design itself;
+  `ARCH.md`'s existing description of the durability model is now actually true rather than
+  aspirational.
+- Not verified against a real MySQL connection-pool-under-load scenario (only `better-sqlite3` in
+  the unit/integration suite) — the fix's correctness is verified, but its actual impact on
+  connection-pool pressure under a real multi-step, high-throughput workload is not measured.
+
+## Next Loop
+
+- No further Critical/High findings this pass beyond the one fixed. Worth a follow-up sweep of
+  `libs/queue`'s outbox/inbox and `libs/database`'s own `TransactionExecutor` call sites for the
+  same "afterCommit-style deferral relying on an ambient transaction that may not actually be
+  active by the time it's called" shape, though neither uses this exact multi-entry-point/shared-
+  loop structure that made it reachable here.
+
+---
+
+# Loop 020
+
+**Library:** libs/workflow
+**Date:** 2026-07-23
+
+## Goal
+
+Second adversarial pass in the same session as Loop 019, matching the "two consecutive clean
+passes" bar this session already reached for `libs/cache`/`libs/queue`/`libs/database`. Focus:
+(1) confirm Loop 019's transaction-scope fix doesn't break any caller's assumptions, by checking
+every caller of `WorkflowExecutor.execute`/`.resume`/`.wake`/`.resumeJoin`/`.signal`; (2) review
+files not touched by Loop 019: `compensation/service.ts`, `scheduling/scheduler.service.ts`,
+`schedule-registration.service.ts`, the TypeORM schedule/signal stores.
+
+## Files Reviewed
+
+- `engine/retry/auto-recovery.service.ts`, `engine/scheduling/scheduler.service.ts` — the only two
+  callers of `WorkflowExecutor.execute`/`.resume`/`.wake` outside `executor.ts` itself. Confirmed
+  neither wraps its call in a `transactionRunner.execute`/`executeOrJoin` of its own — both treat
+  the executor call as an opaque, self-contained unit of work, so Loop 019's removal of the outer
+  transaction wrap applies cleanly with no caller-side assumption broken.
+- `engine/compensation/service.ts` (`compensate`/`compensateReverseOrder`/`compensateCustom`/
+  `compensateSteps`/`compensateWithTimeout`) — no `WorkflowTransactionRunner` dependency at all;
+  purely in-memory handler dispatch + `AbortController`-based timeout racing. Not affected by, and
+  doesn't itself have, the transaction-scope bug class.
+- `engine/scheduling/scheduler.service.ts`, `engine/scheduling/schedule-registration.service.ts`,
+  `persistence/adapters/typeorm/stores/typeorm-workflow-schedule.store.ts` — `claimDue`'s
+  select-candidates → conditional-UPDATE → re-select pattern re-verified as the same safe shape
+  already confirmed for `libs/queue`'s outbox `claimBatch` and `libs/workflow`'s own schedule store
+  in Loop 007.
+- `persistence/adapters/typeorm/stores/typeorm-workflow-signal.store.ts` — re-confirmed the
+  composite `(workflowId, signalId)` key from Loop 001's Critical fix is still the shape used by
+  every method (`load`/`insert`/`exists`/`markProcessed`).
+
+## Problems Found
+
+**Critical / High / Medium / Low** — none this pass.
+
+## Changes Made
+
+None — nothing found that crossed the bar for a change.
+
+## Why
+
+Two consecutive clean adversarial passes (Loop 019 found and fixed one real High-severity
+transaction-scope bug; this loop specifically hunted for callers that might have depended on the
+old, buggy wrapping behavior, and reviewed every remaining unreviewed file, finding nothing) meets
+the ci.loop §16 stopping condition for this library, matching `libs/cache`/`libs/queue`/
+`libs/database`'s status this session.
+
+## Tests
+
+No test changes. Full monorepo suite: 145 suites / 1175 tests, all passing (unchanged — no code
+touched this loop).
+
+## Build
+
+Not re-run — no code changed this loop.
+
+## Lint
+
+Not re-run — no code changed this loop.
+
+## Remaining TODO
+
+- Unchanged from Loop 019: no live-MySQL-under-load verification of the transaction-scope fix's
+  connection-pool impact.
+
+## Next Loop
+
+- No Critical/High/Medium findings across two consecutive adversarial passes. `libs/workflow`
+  remains at a natural stopping point per Section 16 until a new concrete finding or requirement
+  surfaces.
+
+---
+
+# Loop 021
+
+**Library:** libs/workflow
+**Date:** 2026-07-23
+
+## Goal
+
+Close Loop 019/020's explicitly-flagged gap: the per-step transaction-scope fix (Loop 019, High —
+removed the outer transaction wrap so each step commits/releases its connection independently
+instead of one connection being held for an entire multi-step pass) was only verified against
+in-memory sqlite, which has no connection pool and so can't detect a "held connection starves
+other work" failure mode at all. Get real MySQL verification without touching the shared dev
+database.
+
+## Files Reviewed
+
+- No source changes — this loop only adds verification infrastructure and a test.
+- `engine/executor/executor.ts` (Loop 019's fix) re-read to confirm the change under test is
+  still present and unmodified since Loop 019/020.
+
+## Problems Found
+
+None — this loop is verification-only, not a review pass.
+
+## Changes Made
+
+- Local dev infra: reuses the `app_scratch` MySQL scratch schema created this session for
+  `libs/auth` Loop 019 (same `make compose-up` instance, same one-time `app` user grant — no
+  additional infra change needed here).
+- New `workflow-retry.mysql.integration.spec.ts`: a real 3-step workflow run against a real
+  `mysql` `TypeOrmModule.forRoot` connection pool explicitly capped at 3 connections
+  (`extra: { connectionLimit: 3 }`), with 8 instances executed concurrently
+  (`Promise.all`). If Loop 019's bug were still present, a 3-step instance would hold its
+  connection for the whole pass, and 8 concurrent 3-step instances against a 3-connection pool
+  would deadlock or time out; instead all 8 complete, proving connections are actually released
+  back to the pool between steps. Gated behind `RUN_MYSQL_INTEGRATION_TESTS=1` (`describe.skip`
+  by default), matching `libs/auth`'s companion test — `npm test` stays hermetic.
+
+## Why
+
+- This is the exact scenario Loop 019's own "Remaining TODO" named ("no live-MySQL-under-load
+  verification of the transaction-scope fix's connection-pool impact") — not a new finding, but
+  closing a gap the library's own history had already flagged as open.
+- Risk: LOW. No production code changed — only a new opt-in test file, reusing infra already
+  provisioned for `libs/auth`'s companion fix this session.
+
+## Tests
+
+`libs/workflow` suite gains 1 spec file / 1 test (skipped by default). With
+`RUN_MYSQL_INTEGRATION_TESTS=1`: passes — 8/8 concurrent 3-step instances complete against a
+3-connection pool. Full monorepo default suite: 149 suites / 1194 tests, all passing (2
+suites/2 tests skipped by default — this loop's addition plus `libs/auth`'s companion).
+
+## Build
+
+PASS (`npm run typecheck`)
+
+## Lint
+
+PASS (`npm run lint`)
+
+## Remaining TODO
+
+- None outstanding for this library.
+
+## Next Loop
+
+- No Critical/High/Medium findings remain open, and the one previously-flagged verification gap
+  is now closed. `libs/workflow` remains at a natural stopping point per Section 16 until a new
+  concrete finding or requirement surfaces.

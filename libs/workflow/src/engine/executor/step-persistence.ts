@@ -12,6 +12,7 @@ import { WorkflowHistoryService } from '../../persistence/history.service';
 import { WorkflowPersistenceService } from '../../persistence/workflow-persistence.service';
 import { RegisteredWorkflow } from '../../models/registered-workflow';
 import { ChildWorkflowService } from '../child-workflow/child-workflow.service';
+import { WorkflowRegistry } from '../registry/registry';
 
 @Injectable()
 export class WorkflowStepPersistenceService {
@@ -21,6 +22,7 @@ export class WorkflowStepPersistenceService {
     private readonly stateService: WorkflowStateService,
     private readonly persistence: WorkflowPersistenceService,
     private readonly children: ChildWorkflowService,
+    private readonly registry: WorkflowRegistry,
 
     @Inject(WORKFLOW_TRANSACTION_RUNNER)
     private readonly transactionRunner: WorkflowTransactionRunner,
@@ -67,26 +69,44 @@ export class WorkflowStepPersistenceService {
           }
         : undefined;
 
-      const next = this.transitions.completeStep(
-        previous,
-        execution,
-        result.nextStep,
-        result.waitForSignal,
-        result.data,
-        sleepUntil,
-        join,
-      );
+      const spawnSpecs = join ? result.spawnChildren : undefined;
+
+      const pendingEffect = spawnSpecs?.length
+        ? {
+            type: 'spawn-fan-out' as const,
+            specs: spawnSpecs.map((spec) => ({
+              workflowName:
+                this.registry
+                  .getAll()
+                  .find((candidate) => candidate.workflowType === spec.workflow)
+                  ?.metadata.name ?? '',
+              ...(spec.input !== undefined ? { input: spec.input } : {}),
+            })),
+          }
+        : undefined;
+
+      const next = {
+        ...this.transitions.completeStep(
+          previous,
+          execution,
+          result.nextStep,
+          result.waitForSignal,
+          result.data,
+          sleepUntil,
+          join,
+        ),
+        ...(pendingEffect ? { pendingEffect } : {}),
+      };
 
       const persisted = await this.stateService.save(previous, next);
 
       await this.persistence.snapshot(workflow, persisted);
 
-      if (join && result.spawnChildren?.length) {
-        const spawnSpecs = result.spawnChildren;
-
-        this.transactionRunner.afterCommit?.(() =>
-          this.children.spawnFanOut(workflow, persisted, spawnSpecs),
-        );
+      if (spawnSpecs?.length) {
+        this.transactionRunner.afterCommit?.(async () => {
+          await this.children.spawnFanOut(workflow, persisted, spawnSpecs);
+          await this.stateService.clearPendingEffect(persisted.workflowId);
+        });
       }
 
       return persisted;

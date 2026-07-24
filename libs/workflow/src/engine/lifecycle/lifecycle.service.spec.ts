@@ -19,6 +19,7 @@ function setup() {
         next: WorkflowExecutionState,
       ): Promise<WorkflowExecutionState> => Promise.resolve(next),
     ),
+    clearPendingEffect: jest.fn().mockResolvedValue(undefined),
   };
   const transitions = {
     clearRecovery: jest.fn(
@@ -39,8 +40,22 @@ function setup() {
   const recovery = { validateRecoverable: jest.fn() };
   const persistence = { recoverSnapshot: jest.fn().mockResolvedValue(null) };
   const logger = { started: jest.fn(), recovered: jest.fn() };
+  const afterCommitCallbacks: Array<() => Promise<void>> = [];
   const transactionRunner = {
-    afterCommit: jest.fn((callback: () => Promise<void>) => callback()),
+    isActive: jest.fn(() => true),
+    afterCommit: jest.fn((callback: () => Promise<void>) => {
+      afterCommitCallbacks.push(callback);
+    }),
+  };
+  const flushAfterCommit = async (): Promise<void> => {
+    const callbacks = afterCommitCallbacks.splice(
+      0,
+      afterCommitCallbacks.length,
+    );
+
+    for (const callback of callbacks) {
+      await callback();
+    }
   };
 
   const service = new WorkflowLifecycleService(
@@ -67,6 +82,8 @@ function setup() {
     recovery,
     persistence,
     logger,
+    transactionRunner,
+    flushAfterCommit,
   };
 }
 
@@ -80,20 +97,35 @@ describe('WorkflowLifecycleService', () => {
         stateService,
         publisher,
         children,
+        flushAfterCommit,
       } = setup();
       const workflow = { metadata: { name: 'test-workflow' } };
       const state = createWorkflowExecutionState();
+      const stateWithPendingEffect = {
+        ...state,
+        pendingEffect: { type: 'start-children' as const },
+      };
 
       registry.resolve.mockReturnValue(workflow);
       stateFactory.create.mockReturnValue(state);
 
       const result = await service.create('test-workflow', {});
+      await flushAfterCommit();
 
       expect(registry.resolve).toHaveBeenCalledWith('test-workflow', undefined);
-      expect(stateService.insert).toHaveBeenCalledWith(state);
-      expect(publisher.started).toHaveBeenCalledWith(workflow, state);
-      expect(children.startChildren).toHaveBeenCalledWith(workflow, state);
-      expect(result).toEqual({ workflow, state });
+      expect(stateService.insert).toHaveBeenCalledWith(stateWithPendingEffect);
+      expect(publisher.started).toHaveBeenCalledWith(
+        workflow,
+        stateWithPendingEffect,
+      );
+      expect(children.startChildren).toHaveBeenCalledWith(
+        workflow,
+        stateWithPendingEffect,
+      );
+      expect(stateService.clearPendingEffect).toHaveBeenCalledWith(
+        state.workflowId,
+      );
+      expect(result).toEqual({ workflow, state: stateWithPendingEffect });
     });
 
     it('resolves a specific workflowVersion when passed via options', async () => {

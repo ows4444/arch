@@ -2,6 +2,7 @@ import { DataSource } from 'typeorm';
 import { InitialWorkflowSchema1752000000000 } from './1752000000000-InitialWorkflowSchema.migration';
 import { WorkflowSleepUntil1752300000000 } from './1752300000000-WorkflowSleepUntil.migration';
 import { WorkflowJoin1752500000000 } from './1752500000000-WorkflowJoin.migration';
+import { WorkflowPendingEffect1752600000000 } from './1752600000000-WorkflowPendingEffect.migration';
 import { WorkflowStateEntity } from '../entities/workflow-state.entity';
 import { WorkflowIdempotencyEntity } from '../entities/workflow-idempotency.entity';
 import { WorkflowSignalEntity } from '../entities/workflow-signal.entity';
@@ -19,6 +20,7 @@ describe('InitialWorkflowSchema migration', () => {
       InitialWorkflowSchema1752000000000,
       WorkflowSleepUntil1752300000000,
       WorkflowJoin1752500000000,
+      WorkflowPendingEffect1752600000000,
     ];
 
     const dataSource = new DataSource({

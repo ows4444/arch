@@ -1,6 +1,9 @@
 import { Inject, Injectable } from '@nestjs/common';
 
-import { DEFAULT_STUCK_THRESHOLD_MS } from '../../constants/workflow.constants';
+import {
+  DEFAULT_PENDING_EFFECT_GRACE_MS,
+  DEFAULT_STUCK_THRESHOLD_MS,
+} from '../../constants/workflow.constants';
 import { WORKFLOW_STATE_STORE } from '../../constants/workflow.tokens';
 
 import type { WorkflowStateStore } from '../../ports/workflow-state-store';
@@ -80,6 +83,13 @@ export class WorkflowRecoveryService {
     limit?: number,
   ): Promise<WorkflowExecutionState[]> {
     return (await this.store.findWaitingChildren?.(limit)) ?? [];
+  }
+
+  async findPendingEffectExecutions(
+    olderThanMs = DEFAULT_PENDING_EFFECT_GRACE_MS,
+    limit?: number,
+  ): Promise<WorkflowExecutionState[]> {
+    return (await this.store.findPendingEffects?.(olderThanMs, limit)) ?? [];
   }
 
   async markAsRecoverable(workflowId: string): Promise<void> {

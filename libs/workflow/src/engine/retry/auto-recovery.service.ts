@@ -8,7 +8,9 @@ import {
 import { SchedulerRegistry } from '@nestjs/schedule';
 import { ChildWorkflowService } from '../child-workflow/child-workflow.service';
 import { WorkflowExecutor } from '../executor/executor';
+import { WorkflowFailureService } from '../lifecycle/failure.service';
 import { WorkflowRegistry } from '../registry/registry';
+import { WorkflowStateService } from '../state/service';
 import { WorkflowRecoveryService } from './recovery.service';
 import {
   DEFAULT_SIGNAL_TIMEOUT_MS,
@@ -30,6 +32,8 @@ export class WorkflowAutoRecoveryService
     private readonly registry: WorkflowRegistry,
     private readonly scheduler: SchedulerRegistry,
     private readonly children: ChildWorkflowService,
+    private readonly failureService: WorkflowFailureService,
+    private readonly stateService: WorkflowStateService,
 
     @Inject(WORKFLOW_METRICS)
     private readonly metrics: WorkflowMetrics,
@@ -284,12 +288,93 @@ export class WorkflowAutoRecoveryService
       }
     }
 
+    // Safety net for every `afterCommit`-deferred side effect in the engine
+    // (spawning/cancelling children, scheduling a retry) — see
+    // `WorkflowPendingEffect`. A marker only survives here if the callback
+    // never confirmed running (process crash between commit and the
+    // callback executing); the normal path clears it immediately.
+    const pendingEffects = await this.recovery.findPendingEffectExecutions(
+      undefined,
+      batchSize,
+    );
+
+    let pendingEffectsReplayedCount = 0;
+
+    for (const execution of pendingEffects) {
+      const effect = execution.pendingEffect;
+
+      if (!effect) {
+        continue;
+      }
+
+      try {
+        const definition = workflowMap.get(
+          WorkflowRegistry.buildKey(
+            execution.workflowName,
+            execution.workflowVersion,
+          ),
+        );
+
+        if (!definition) {
+          this.logger.warn(
+            `Skipping pendingEffect replay for workflow=${execution.workflowName} ` +
+              `workflowId=${execution.workflowId} — workflow no longer registered`,
+          );
+          continue;
+        }
+
+        switch (effect.type) {
+          case 'start-children':
+            await this.children.startChildren(definition, execution);
+            break;
+
+          case 'spawn-fan-out':
+            await this.children.spawnFanOutFromNames(
+              definition,
+              execution,
+              effect.specs,
+            );
+            break;
+
+          case 'cancel-children':
+            await this.children.cancelChildren(definition, execution);
+            break;
+
+          case 'retry-child':
+            await this.children.replayRetryChild(execution);
+            break;
+
+          case 'schedule-retry-or-compensation':
+            await this.failureService.scheduleRetryOrCompensation(
+              definition,
+              execution,
+            );
+            break;
+        }
+
+        await this.stateService.clearPendingEffect(execution.workflowId);
+        pendingEffectsReplayedCount++;
+
+        this.logger.debug(
+          `Replayed pendingEffect type=${effect.type} for workflow=${execution.workflowName} ` +
+            `workflowId=${execution.workflowId}`,
+        );
+      } catch (error) {
+        this.logger.error(
+          `Failed to replay pendingEffect type=${effect.type} for workflow=${execution.workflowName} ` +
+            `workflowId=${execution.workflowId}`,
+          error instanceof Error ? error.stack : String(error),
+        );
+      }
+    }
+
     if (
       recoveredCount > 0 ||
       stuckCount > 0 ||
       expiredCount > 0 ||
       sleepWokenCount > 0 ||
-      stuckJoinResumedCount > 0
+      stuckJoinResumedCount > 0 ||
+      pendingEffectsReplayedCount > 0
     ) {
       this.logger.log(
         `Recovery sweep complete — ` +
@@ -297,7 +382,8 @@ export class WorkflowAutoRecoveryService
           `stuckDetected=${stuckCount} ` +
           `expiredCancelled=${expiredCount} ` +
           `sleepWoken=${sleepWokenCount} ` +
-          `stuckJoinResumed=${stuckJoinResumedCount}`,
+          `stuckJoinResumed=${stuckJoinResumedCount} ` +
+          `pendingEffectsReplayed=${pendingEffectsReplayedCount}`,
       );
     } else {
       this.logger.debug('Recovery sweep complete — nothing to process');
@@ -308,5 +394,6 @@ export class WorkflowAutoRecoveryService
     this.metrics.sweepExpiredCancelled(expiredCount);
     this.metrics.sweepStuckJoinResumed(stuckJoinResumedCount);
     this.metrics.sweepSleepWoken(sleepWokenCount);
+    this.metrics.sweepPendingEffectsReplayed?.(pendingEffectsReplayedCount);
   }
 }

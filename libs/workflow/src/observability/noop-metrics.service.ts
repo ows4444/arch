@@ -8,6 +8,7 @@ export class NoopWorkflowMetricsService implements WorkflowMetrics {
   sweepExpiredCancelled(): void {}
   sweepSleepWoken(): void {}
   sweepStuckJoinResumed(): void {}
+  sweepPendingEffectsReplayed(): void {}
   retentionDeleted(): void {}
   retentionArchived(): void {}
   workflowStarted(): void {}

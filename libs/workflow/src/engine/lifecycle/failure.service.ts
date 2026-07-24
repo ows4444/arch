@@ -10,10 +10,12 @@ import { WorkflowFailureError } from '../../errors';
 import { WorkflowExecutionError } from '../../errors/workflow.errors';
 import { WorkflowExecutionState } from '../../models/workflow-execution-state';
 import { WorkflowFailure } from '../../models/workflow-failure';
+import { RegisteredWorkflow } from '../../models/registered-workflow';
 import { WorkflowLogger } from '../../observability/logger';
 import type { WorkflowTransactionRunner } from '../../ports/workflow-transaction-runner';
 import { WorkflowStepPersistenceService } from '../executor/step-persistence';
 import { ChildWorkflowService } from '../child-workflow/child-workflow.service';
+import { afterCommitOrNow } from '../../shared/utils/after-commit-or-now';
 
 @Injectable()
 export class WorkflowFailureService {
@@ -122,46 +124,75 @@ export class WorkflowFailureService {
       latest.workflowVersion,
     );
 
-    this.transactionRunner.afterCommit?.(async () => {
+    const needsScheduling =
+      !!workflow.metadata.retries || !!workflow.metadata.compensation?.enabled;
+
+    const markedState = needsScheduling
+      ? await this.stateService.setPendingEffect(latest, {
+          type: 'schedule-retry-or-compensation',
+        })
+      : latest;
+
+    await afterCommitOrNow(this.transactionRunner, async () => {
       try {
-        await this.publisher.failed(workflow, latest);
+        await this.publisher.failed(workflow, markedState);
       } catch (publishError) {
         this.opsLogger.error(
-          `Failed to publish the 'failed' lifecycle event for workflow=${latest.workflowName} workflowId=${latest.workflowId} — the workflow's failure was still recorded; only the event notification was lost.`,
+          `Failed to publish the 'failed' lifecycle event for workflow=${markedState.workflowName} workflowId=${markedState.workflowId} — the workflow's failure was still recorded; only the event notification was lost.`,
           publishError instanceof Error
             ? publishError.stack
             : String(publishError),
         );
       }
 
-      try {
-        const retry = workflow.metadata.retries;
-
-        if (retry && this.retryService.canRetry(latest, retry.maxAttempts)) {
-          await this.retryService.retry(latest, retry);
-          return;
-        }
-
-        if (workflow.metadata.compensation?.enabled) {
-          const fullyCompensated = await this.compensation.compensate(
-            workflow,
-            latest,
-          );
-
-          if (!fullyCompensated) {
-            this.opsLogger.error(
-              `Compensation did not fully complete for workflow=${latest.workflowName} workflowId=${latest.workflowId} — one or more steps' compensation handlers failed (see prior 'Compensation failed for step' errors) and will require manual intervention.`,
-            );
-          }
-        }
-      } catch (schedulingError) {
-        this.opsLogger.error(
-          `Failed to schedule retry/compensation after workflow failure for workflow=${latest.workflowName} workflowId=${latest.workflowId} — the workflow is 'failed' with no retry or compensation scheduled and will require manual intervention.`,
-          schedulingError instanceof Error
-            ? schedulingError.stack
-            : String(schedulingError),
-        );
+      if (!needsScheduling) {
+        return;
       }
+
+      await this.scheduleRetryOrCompensation(workflow, markedState);
+      await this.stateService.clearPendingEffect(markedState.workflowId);
     });
+  }
+
+  /**
+   * Schedules a top-level retry or runs compensation for a permanently-
+   * failed execution. Extracted out of `failExecution`'s `afterCommit`
+   * closure so `WorkflowAutoRecoveryService`'s replay sweep can re-invoke
+   * the exact same logic for a `schedule-retry-or-compensation`
+   * `WorkflowPendingEffect` that never confirmed running (a crash between
+   * the failure's commit and this callback executing).
+   */
+  async scheduleRetryOrCompensation(
+    workflow: RegisteredWorkflow,
+    state: WorkflowExecutionState,
+  ): Promise<void> {
+    try {
+      const retry = workflow.metadata.retries;
+
+      if (retry && this.retryService.canRetry(state, retry.maxAttempts)) {
+        await this.retryService.retry(state, retry);
+        return;
+      }
+
+      if (workflow.metadata.compensation?.enabled) {
+        const fullyCompensated = await this.compensation.compensate(
+          workflow,
+          state,
+        );
+
+        if (!fullyCompensated) {
+          this.opsLogger.error(
+            `Compensation did not fully complete for workflow=${state.workflowName} workflowId=${state.workflowId} — one or more steps' compensation handlers failed (see prior 'Compensation failed for step' errors) and will require manual intervention.`,
+          );
+        }
+      }
+    } catch (schedulingError) {
+      this.opsLogger.error(
+        `Failed to schedule retry/compensation after workflow failure for workflow=${state.workflowName} workflowId=${state.workflowId} — the workflow is 'failed' with no retry or compensation scheduled and will require manual intervention.`,
+        schedulingError instanceof Error
+          ? schedulingError.stack
+          : String(schedulingError),
+      );
+    }
   }
 }

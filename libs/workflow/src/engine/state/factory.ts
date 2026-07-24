@@ -14,6 +14,7 @@ export class WorkflowStateFactory {
       parentWorkflowId?: string;
       parentExecutionId?: string;
       joinId?: string | undefined;
+      workflowId?: string | undefined;
     },
   ): WorkflowExecutionState {
     const now = new Date();
@@ -22,7 +23,7 @@ export class WorkflowStateFactory {
 
     return {
       executionId: randomUUID(),
-      workflowId: randomUUID(),
+      workflowId: options?.workflowId ?? randomUUID(),
       correlationId,
 
       parentWorkflowId: options?.parentWorkflowId,

@@ -1,6 +1,7 @@
 import { WorkflowStatus } from '../types/workflow-status';
 import { WorkflowFailure } from './workflow-failure';
 import { WorkflowJoinPolicy } from './workflow-join-policy';
+import { WorkflowPendingEffect } from './workflow-pending-effect';
 import { WorkflowSignal } from './workflow-signal';
 import { WorkflowStepId } from './workflow-step-id';
 
@@ -52,6 +53,13 @@ export interface WorkflowExecutionState<
   readonly stepStartedAt?: Date | undefined;
 
   readonly requiresRecovery?: boolean | undefined;
+
+  /**
+   * Set when a lifecycle side-effect has been deferred to `afterCommit` but
+   * hasn't been confirmed to run yet — see `WorkflowPendingEffect`. Cleared
+   * once that effect completes (successfully or having given up).
+   */
+  readonly pendingEffect?: WorkflowPendingEffect | undefined;
 
   readonly leaseOwner?: string | undefined;
 

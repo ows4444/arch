@@ -1,6 +1,9 @@
 import { forwardRef, Inject, Injectable, Logger, Type } from '@nestjs/common';
 
-import { WorkflowExecutor } from '../executor/executor';
+import {
+  WorkflowExecutionOptions,
+  WorkflowExecutor,
+} from '../executor/executor';
 import { RegisteredWorkflow } from '../../models/registered-workflow';
 import { WorkflowChildSpawnSpec } from '../../models/workflow-child-spawn-spec';
 import { WorkflowExecutionResult } from '../../models/workflow-execution-result';
@@ -24,6 +27,7 @@ import {
 import { WorkflowChildMetadata } from '../../definition/workflow-child-metadata';
 import { NonRetriableWorkflowError } from '../../errors';
 import {
+  WorkflowConcurrencyError,
   WorkflowError,
   WorkflowExecutionError,
 } from '../../errors/workflow.errors';
@@ -31,6 +35,7 @@ import type { WorkflowParentFailureHandler } from '../../ports/workflow-parent-f
 import type { WorkflowRetryJitter } from '../../models/workflow-retry-jitter';
 import type { WorkflowRetryScheduler } from '../../models/workflow-retry-scheduler';
 import type { WorkflowTransactionRunner } from '../../ports/workflow-transaction-runner';
+import { afterCommitOrNow } from '../../shared/utils/after-commit-or-now';
 
 @Injectable()
 export class ChildWorkflowService {
@@ -502,7 +507,7 @@ export class ChildWorkflowService {
         // synchronously resume the parent's join step via resumeJoin() —
         // real step execution, not just a state flip.
         if (child.joinId) {
-          this.transactionRunner.afterCommit?.(() =>
+          await afterCommitOrNow(this.transactionRunner, () =>
             this.checkJoinQuorum(parent.workflowId).then(() => undefined),
           );
         }
@@ -536,14 +541,19 @@ export class ChildWorkflowService {
         // to schedule its own top-level retry/compensation — ensures the
         // wait and the resumed execution both happen only after the
         // failure's own transaction has actually committed.
-        this.transactionRunner.afterCommit?.(async () => {
-          await this.retryChild(definition, child);
+        const markedChild = await this.stateService.setPendingEffect(child, {
+          type: 'retry-child',
+        });
+
+        await afterCommitOrNow(this.transactionRunner, async () => {
+          await this.retryChild(definition, markedChild);
+          await this.stateService.clearPendingEffect(markedChild.workflowId);
 
           // retryChild() either resumed the child (still in-flight, not
           // resolved) or gave up once maxRetries was reached (now
           // permanently 'failed') — checkJoinQuorum re-reads the child's
           // current status itself, so it's correct either way.
-          if (child.joinId) {
+          if (markedChild.joinId) {
             await this.checkJoinQuorum(parent.workflowId);
           }
         });
@@ -582,6 +592,48 @@ export class ChildWorkflowService {
     }
   }
 
+  /**
+   * Wraps `WorkflowExecutor.execute` with a caller-chosen deterministic
+   * `workflowId`, making child creation idempotent under replay: a
+   * `WorkflowPendingEffect` (`'start-children'`/`'spawn-fan-out'`) can be
+   * replayed by `WorkflowAutoRecoveryService`'s sweep after a crash that
+   * left some (not all) children from the original attempt already
+   * created. Re-deriving the same `workflowId` for the same logical child
+   * means the replay's `insert` collides on the primary key instead of
+   * creating a duplicate — caught here and treated as "already done."
+   */
+  private async spawnIdempotently(
+    workflowName: string,
+    input: Record<string, unknown>,
+    workflowId: string,
+    options: Omit<WorkflowExecutionOptions, 'workflowId'>,
+  ): Promise<WorkflowExecutionResult> {
+    try {
+      return await this.executor.execute(workflowName, input, {
+        ...options,
+        workflowId,
+      });
+    } catch (error) {
+      if (!(error instanceof WorkflowConcurrencyError)) {
+        throw error;
+      }
+
+      const existing = await this.stateService.load(workflowId);
+
+      if (!existing) {
+        throw error;
+      }
+
+      return {
+        workflowId: existing.workflowId,
+        status: existing.status,
+        currentStep: existing.currentStep,
+        iteration: existing.iteration,
+        data: existing.data,
+      };
+    }
+  }
+
   async startChildren(
     workflow: RegisteredWorkflow,
     state: WorkflowExecutionState,
@@ -604,9 +656,10 @@ export class ChildWorkflowService {
           );
         }
 
-        return this.executor.execute(
+        return this.spawnIdempotently(
           registered.metadata.name,
           {},
+          `${state.workflowId}:start:${registered.metadata.name}`,
           {
             correlationId: state.correlationId,
             parentWorkflowId: state.workflowId,
@@ -688,7 +741,7 @@ export class ChildWorkflowService {
     }
 
     const results = await Promise.allSettled(
-      specs.map(async (spec) => {
+      specs.map(async (spec, index) => {
         const definition = workflow.metadata.childWorkflows?.find(
           (candidate) => candidate.workflow === spec.workflow,
         );
@@ -708,9 +761,10 @@ export class ChildWorkflowService {
           );
         }
 
-        return this.executor.execute(
+        return this.spawnIdempotently(
           registered.metadata.name,
           spec.input ?? {},
+          `${state.workflowId}:${state.joinId}:${index}`,
           {
             correlationId: state.correlationId,
             parentWorkflowId: state.workflowId,
@@ -761,6 +815,133 @@ export class ChildWorkflowService {
         `Failed to spawn ${failures.length} of ${specs.length} fan-out child workflow(s).`,
       ),
     );
+  }
+
+  /**
+   * Replays a `spawn-fan-out` `WorkflowPendingEffect` — the persisted form
+   * of a `spawnFanOut` call that never confirmed running (e.g. a crash
+   * between the step's commit and the deferred `spawnFanOut` call). Takes
+   * workflow *names* rather than `WorkflowChildSpawnSpec`'s `Type<unknown>`
+   * references, since that's what survives a JSON round-trip — see
+   * `WorkflowPendingEffect`. Deliberately not unified with `spawnFanOut`
+   * into one shared helper: the two differ in how they resolve a target
+   * (`Type` equality vs. name lookup) and in failure semantics (a name that
+   * no longer resolves to a registered workflow is a "this workflow class
+   * was removed/renamed since the marker was written" replay concern, not
+   * the original call's "this class was never declared as a `trigger:
+   * 'step'` child" validation concern) — forcing one abstraction over both
+   * seemed more likely to obscure than help, matching `spawnFanOut`'s own
+   * reasoning against unifying with `startChildren`.
+   */
+  async spawnFanOutFromNames(
+    workflow: RegisteredWorkflow,
+    state: WorkflowExecutionState,
+    specs: readonly {
+      readonly workflowName: string;
+      readonly input?: Record<string, unknown>;
+    }[],
+  ): Promise<void> {
+    if (specs.length === 0) {
+      return;
+    }
+
+    const results = await Promise.allSettled(
+      specs.map(async (spec, index) => {
+        const registered = this.registry
+          .getAll()
+          .find((candidate) => candidate.metadata.name === spec.workflowName);
+
+        if (!registered) {
+          throw new NonRetriableWorkflowError(
+            `Fan-out replay could not find a registered workflow named '${spec.workflowName}' ` +
+              `for parent '${workflow.metadata.name}'`,
+          );
+        }
+
+        return this.spawnIdempotently(
+          registered.metadata.name,
+          spec.input ?? {},
+          `${state.workflowId}:${state.joinId}:${index}`,
+          {
+            correlationId: state.correlationId,
+            parentWorkflowId: state.workflowId,
+            parentExecutionId: state.executionId,
+            joinId: state.joinId,
+          },
+        );
+      }),
+    );
+
+    const failures = results.filter(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
+
+    if (failures.length === 0) {
+      return;
+    }
+
+    const started = results.filter(
+      (result): result is PromiseFulfilledResult<WorkflowExecutionResult> =>
+        result.status === 'fulfilled',
+    );
+
+    if (started.length > 0) {
+      await Promise.allSettled(
+        started.map(({ value }) => this.executor.cancel(value.workflowId)),
+      );
+    }
+
+    this.logger.error(
+      `Fan-out replay failed to spawn ${failures.length}/${specs.length} child workflow(s) ` +
+        `for parent '${state.workflowId}': ` +
+        failures
+          .map((failure) =>
+            failure.reason instanceof Error
+              ? failure.reason.message
+              : String(failure.reason),
+          )
+          .join('; ') +
+        (started.length > 0
+          ? `. Cancelled ${started.length} already-started sibling child workflow(s).`
+          : ''),
+    );
+
+    await this.parentFailureHandler.failExecution(
+      state,
+      new NonRetriableWorkflowError(
+        `Fan-out replay failed to spawn ${failures.length} of ${specs.length} child workflow(s).`,
+      ),
+    );
+  }
+
+  /**
+   * Replays a `retry-child` `WorkflowPendingEffect` — the persisted form of
+   * a `retryChild` call deferred to `afterCommit` that never confirmed
+   * running. Re-resolves the parent/definition from current state rather
+   * than trusting anything captured at marker-write time, since `retryChild`
+   * itself is a private implementation detail of the live `onChildFailed`
+   * path and naturally idempotent (it no-ops once the child is no longer
+   * `'failed'`).
+   */
+  async replayRetryChild(child: WorkflowExecutionState): Promise<void> {
+    const parent = await this.findParent(child);
+
+    if (!parent) {
+      return;
+    }
+
+    const parentWorkflow = this.registry.get(
+      parent.workflowName,
+      parent.workflowVersion,
+    );
+
+    const definition = this.findDefinition(parentWorkflow, child);
+
+    if (!definition || definition.failurePolicy !== 'retry-child') {
+      return;
+    }
+
+    await this.retryChild(definition, child);
   }
 
   async cancelChildren(

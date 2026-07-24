@@ -15,3 +15,9 @@ export const DEFAULT_CHILD_RETRY_DELAY_MS = 5 * 1000; // 5 seconds
 export const DEFAULT_SCHEDULER_SWEEP_INTERVAL_MS = 30 * 1000; // 30 seconds
 export const DEFAULT_SCHEDULER_CLAIM_STALE_MS = 60 * 1000; // 1 minute
 export const DEFAULT_SCHEDULER_BATCH_SIZE = 50;
+
+// How long a WorkflowPendingEffect marker must sit unconfirmed before the
+// recovery sweep treats it as dropped (rather than still in-flight) and
+// replays it — see models/workflow-pending-effect.ts. Generous enough to
+// clear 'retry-child's real-time backoff wait under normal conditions.
+export const DEFAULT_PENDING_EFFECT_GRACE_MS = 2 * 60 * 1000; // 2 minutes

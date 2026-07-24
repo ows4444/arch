@@ -22,6 +22,14 @@ function setup() {
       ): Promise<WorkflowExecutionState> => Promise.resolve(next),
     ),
     load: jest.fn(),
+    setPendingEffect: jest.fn(
+      (
+        state: WorkflowExecutionState,
+        pendingEffect: unknown,
+      ): Promise<WorkflowExecutionState> =>
+        Promise.resolve({ ...state, pendingEffect } as WorkflowExecutionState),
+    ),
+    clearPendingEffect: jest.fn().mockResolvedValue(undefined),
   };
   const retryService = {
     canRetry: jest.fn().mockReturnValue(false),
@@ -37,6 +45,7 @@ function setup() {
   let afterCommitCallback: (() => Promise<void>) | undefined;
   const transactionRunner = {
     executeOrJoin: jest.fn((operation: () => unknown) => operation()),
+    isActive: jest.fn(() => true),
     afterCommit: jest.fn((callback: () => Promise<void>) => {
       afterCommitCallback = callback;
     }),

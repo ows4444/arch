@@ -39,6 +39,10 @@ export class WorkflowStateMapper {
       iteration: state.iteration,
       failureCount: state.failureCount ?? null,
       requiresRecovery: state.requiresRecovery ?? null,
+      pendingEffect:
+        (state.pendingEffect as
+          | QueryDeepPartialEntity<WorkflowStateEntity>['pendingEffect']
+          | undefined) ?? null,
       recoveryAttempts: state.recoveryAttempts ?? null,
       retryAt: state.retryAt ?? null,
       leaseOwner: state.leaseOwner ?? null,
@@ -89,6 +93,7 @@ export class WorkflowStateMapper {
       iteration: entity.iteration,
       failureCount: entity.failureCount ?? undefined,
       requiresRecovery: entity.requiresRecovery ?? undefined,
+      pendingEffect: entity.pendingEffect ?? undefined,
       recoveryAttempts: entity.recoveryAttempts ?? undefined,
       leaseOwner: entity.leaseOwner ?? undefined,
       leaseExpiresAt: entity.leaseExpiresAt ?? undefined,

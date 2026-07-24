@@ -18,6 +18,14 @@ function setup(maxRetries = 3) {
     save: jest.fn(),
     findByParentWorkflowId: jest.fn(),
     load: jest.fn(),
+    setPendingEffect: jest.fn(
+      (
+        state: WorkflowExecutionState,
+        pendingEffect: unknown,
+      ): Promise<WorkflowExecutionState> =>
+        Promise.resolve({ ...state, pendingEffect } as WorkflowExecutionState),
+    ),
+    clearPendingEffect: jest.fn().mockResolvedValue(undefined),
   };
   const compensation = { compensate: jest.fn().mockResolvedValue(true) };
   const transitions = {
@@ -35,6 +43,7 @@ function setup(maxRetries = 3) {
 
   const afterCommitCallbacks: Array<() => Promise<void>> = [];
   const transactionRunner = {
+    isActive: jest.fn(() => true),
     afterCommit: jest.fn((callback: () => Promise<void>) => {
       afterCommitCallbacks.push(callback);
     }),
@@ -399,6 +408,73 @@ describe('ChildWorkflowService', () => {
 
       expect(executor.execute).not.toHaveBeenCalled();
     });
+
+    it('passes a deterministic workflowId derived from the parent and child name', async () => {
+      const { service, executor } = setup();
+      executor.execute.mockResolvedValue({
+        workflowId: 'child-1',
+        status: 'running',
+        iteration: 0,
+        data: {},
+      });
+
+      const workflow = {
+        metadata: {
+          name: 'parent-workflow',
+          version: 1,
+          childWorkflows: [
+            {
+              workflow: ChildWorkflowClass,
+              failurePolicy: 'ignore' as const,
+              cancellationPolicy: 'detach' as const,
+            },
+          ],
+        },
+      };
+
+      await service.startChildren(workflow as never, parent);
+
+      expect(executor.execute).toHaveBeenCalledWith(
+        'child-workflow',
+        {},
+        expect.objectContaining({
+          workflowId: `${parent.workflowId}:start:child-workflow`,
+        }),
+      );
+    });
+
+    it('treats a duplicate-key collision on the deterministic workflowId as an idempotent no-op (replay after a partial crash)', async () => {
+      const { service, executor, stateService, parentFailureHandler } = setup();
+      const alreadyStarted = createWorkflowExecutionState({
+        workflowId: `${parent.workflowId}:start:child-workflow`,
+        workflowName: 'child-workflow',
+        status: 'running',
+      });
+      executor.execute.mockRejectedValue(
+        new WorkflowConcurrencyError('duplicate'),
+      );
+      stateService.load.mockResolvedValue(alreadyStarted);
+
+      const workflow = {
+        metadata: {
+          name: 'parent-workflow',
+          version: 1,
+          childWorkflows: [
+            {
+              workflow: ChildWorkflowClass,
+              failurePolicy: 'ignore' as const,
+              cancellationPolicy: 'detach' as const,
+            },
+          ],
+        },
+      };
+
+      await service.startChildren(workflow as never, parent);
+
+      expect(stateService.load).toHaveBeenCalledWith(alreadyStarted.workflowId);
+      expect(executor.cancel).not.toHaveBeenCalled();
+      expect(parentFailureHandler.failExecution).not.toHaveBeenCalled();
+    });
   });
 
   describe('spawnFanOut', () => {
@@ -494,6 +570,71 @@ describe('ChildWorkflowService', () => {
 
       expect(executor.cancel).toHaveBeenCalledWith('child-1');
       expect(parentFailureHandler.failExecution).toHaveBeenCalledTimes(1);
+    });
+
+    it('tags each spec with an index-scoped deterministic workflowId so replay can dedup per-spec', async () => {
+      const { service, executor } = setup();
+      executor.execute.mockResolvedValue({
+        workflowId: 'child-1',
+        status: 'running',
+        iteration: 0,
+        data: {},
+      });
+      const parentWaiting = createWorkflowExecutionState({
+        workflowId: 'parent-1',
+        workflowName: 'parent-workflow',
+        status: 'waiting-children',
+        joinId: 'parent-1:fan-out:1',
+      });
+
+      await service.spawnFanOut(fanOutWorkflow() as never, parentWaiting, [
+        { workflow: ChildWorkflowClass, input: { branch: 1 } },
+        { workflow: ChildWorkflowClass, input: { branch: 2 } },
+      ]);
+
+      expect(executor.execute).toHaveBeenNthCalledWith(
+        1,
+        'child-workflow',
+        { branch: 1 },
+        expect.objectContaining({
+          workflowId: 'parent-1:parent-1:fan-out:1:0',
+        }),
+      );
+      expect(executor.execute).toHaveBeenNthCalledWith(
+        2,
+        'child-workflow',
+        { branch: 2 },
+        expect.objectContaining({
+          workflowId: 'parent-1:parent-1:fan-out:1:1',
+        }),
+      );
+    });
+
+    it("treats a duplicate-key collision on a spec's deterministic workflowId as an idempotent no-op (replay after a partial crash)", async () => {
+      const { service, executor, stateService, parentFailureHandler } = setup();
+      const parentWaiting = createWorkflowExecutionState({
+        workflowId: 'parent-1',
+        workflowName: 'parent-workflow',
+        status: 'waiting-children',
+        joinId: 'parent-1:fan-out:1',
+      });
+      const alreadySpawned = createWorkflowExecutionState({
+        workflowId: 'parent-1:parent-1:fan-out:1:0',
+        workflowName: 'child-workflow',
+        status: 'running',
+      });
+      executor.execute.mockRejectedValue(
+        new WorkflowConcurrencyError('duplicate'),
+      );
+      stateService.load.mockResolvedValue(alreadySpawned);
+
+      await service.spawnFanOut(fanOutWorkflow() as never, parentWaiting, [
+        { workflow: ChildWorkflowClass, input: { branch: 1 } },
+      ]);
+
+      expect(stateService.load).toHaveBeenCalledWith(alreadySpawned.workflowId);
+      expect(executor.cancel).not.toHaveBeenCalled();
+      expect(parentFailureHandler.failExecution).not.toHaveBeenCalled();
     });
   });
 
