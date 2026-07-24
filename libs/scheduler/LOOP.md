@@ -226,3 +226,81 @@ PASS (`npx eslint "libs/scheduler/**/*.ts"`)
 
 - No further work queued until a concrete job needs scheduling, or one of ARCH.md's Open Questions
   gets a real trigger.
+
+---
+
+# Loop 003
+
+**Library:** libs/scheduler
+**Date:** 2026-07-24
+
+## Goal
+
+Cross-reference entry only — the actual work happened in `libs/auth` (Loop 024, wiring
+`auth.refresh-token-purge` as this library's first real `@ScheduledJob` consumer, closing the
+"no real consumer exists yet" gap Loop 001/002 both left open). Recorded here per `ci.loop`'s
+cross-checking discipline, since the bug found belongs to this library's own code.
+
+## Files Reviewed
+
+- `engine/cron-time.util.ts` (`computeNextFireAt`) — the site of the bug, reviewed in response to a
+  live-verification failure while wiring `libs/auth`'s consumer, not as a fresh scheduled pass.
+
+## Problems Found
+
+**Critical**
+- `computeNextFireAt(cronExpression, timezone)` calls `new CronTime(cronExpression, timezone)` with
+  `timezone` passed through as-is from `ScheduledJobOptions.timezone` — `undefined` whenever a
+  `@ScheduledJob` call omits it (as `auth.refresh-token-purge` initially did). The underlying `cron`
+  package defaults an undefined timezone to the **Node process's local system timezone**, not UTC.
+  Every job's cron schedule silently evaluates against local time instead of UTC unless every single
+  call site remembers to pass `{ timezone: 'UTC' }` explicitly. Invisible in this library's own
+  Loop 001/002 live verification because those checks confirmed fires *happened*, not that they
+  happened at the *correct absolute UTC instant* — this sandbox's local TZ (`Asia/Karachi`, UTC+5)
+  happened to make the drift large enough to notice once `libs/auth`'s test manually cross-checked
+  `nextFireAt` against true wall-clock time. Fixed at the process level for this session
+  (`TZ=UTC` in `.env`/`.env.example`, `libs/auth/LOOP.md` Loop 024) rather than in this library's
+  code — see Remaining TODO below for the still-open library-level question.
+
+## Changes Made
+
+- None in this library's own source — see `libs/auth/LOOP.md` Loop 024 for the actual fix
+  (process-level `TZ=UTC`, plus a defense-in-depth explicit `{ timezone: 'UTC' }` on the one real
+  consumer).
+
+## Why
+
+Per `ci.loop` §4 Phase 3 ("note if the fix pattern should be back-ported or cross-checked against
+another `libs/*` package") — the bug lives in this library's `computeNextFireAt`, so it's recorded
+here even though the fix that shipped this session was process-level, not a code change to this
+library.
+
+## Tests
+
+Unchanged — this library's own suite (28 tests) wasn't touched this loop. See `libs/auth/LOOP.md`
+Loop 024 for the live verification that surfaced this.
+
+## Build
+
+Unchanged (no source touched).
+
+## Lint
+
+Unchanged (no source touched).
+
+## Remaining TODO
+
+- **Open design question for the next loop:** should `ScheduledJobOptions.timezone` default to
+  `'UTC'` instead of `undefined` (silently inheriting host-local time), or should
+  `computeNextFireAt`/the `@ScheduledJob` decorator require an explicit `timezone` and throw a
+  `SchedulerConfigurationError` if omitted (fail loud instead of silently defaulting to something a
+  job author likely didn't intend)? Both are real options with different tradeoffs (convenience vs.
+  explicitness) — deliberately not decided in this cross-reference entry, since it's a genuine
+  Section 0.5 HIGH-risk API-shape decision (changes what every future `@ScheduledJob` call site
+  looks like), not a bug-fix-in-passing.
+- Unchanged from Loop 001/002: a runtime admin API and failure alerting remain deferred.
+
+## Next Loop
+
+- Decide the open timezone-default question above, the next time this library gets a scheduled
+  review pass or a second `@ScheduledJob` consumer appears.

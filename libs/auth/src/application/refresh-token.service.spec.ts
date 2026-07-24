@@ -15,6 +15,9 @@ describe('RefreshTokenService', () => {
       findActiveForUser: jest.fn().mockResolvedValue([]),
       revokeMany: jest.fn().mockResolvedValue(undefined),
       revokeIfActiveForUser: jest.fn().mockResolvedValue(true),
+      deleteExpiredAndRevoked: jest
+        .fn<Promise<number>, [Date]>()
+        .mockResolvedValue(0),
     };
     const events = {
       publishUserRegistered: jest.fn(),
@@ -310,6 +313,64 @@ describe('RefreshTokenService', () => {
       await expect(service.revokeOne('user-1', 'rt-other')).rejects.toThrow(
         SessionNotFoundError,
       );
+    });
+  });
+
+  describe('purgeExpiredTokens', () => {
+    it('deletes rows past the default 24h purge grace window', async () => {
+      const { service, repository } = setup();
+      const before = Date.now();
+
+      await service.purgeExpiredTokens();
+
+      expect(repository.deleteExpiredAndRevoked).toHaveBeenCalledTimes(1);
+      const [cutoff] = repository.deleteExpiredAndRevoked.mock.calls[0]!;
+      const expectedCutoff = before - 24 * 60 * 60 * 1000;
+      // Allow slack for time elapsed between capturing `before` and the call.
+      expect(cutoff.getTime()).toBeGreaterThanOrEqual(expectedCutoff - 1000);
+      expect(cutoff.getTime()).toBeLessThanOrEqual(expectedCutoff + 1000);
+    });
+
+    it('uses a configured refreshTokenPurgeGraceSeconds instead of the default', async () => {
+      const repository = {
+        save: jest.fn().mockResolvedValue(undefined),
+        findByTokenHash: jest.fn(),
+        update: jest.fn().mockResolvedValue(undefined),
+        revokeIfActive: jest.fn().mockResolvedValue(true),
+        revokeFamily: jest.fn().mockResolvedValue(undefined),
+        revokeAllForUser: jest.fn().mockResolvedValue(undefined),
+        findActiveForUser: jest.fn().mockResolvedValue([]),
+        revokeMany: jest.fn().mockResolvedValue(undefined),
+        revokeIfActiveForUser: jest.fn().mockResolvedValue(true),
+        deleteExpiredAndRevoked: jest
+          .fn<Promise<number>, [Date]>()
+          .mockResolvedValue(0),
+      };
+      const events = {
+        publishUserRegistered: jest.fn(),
+        publishUserLoggedIn: jest.fn(),
+        publishPasswordChanged: jest.fn(),
+        publishRefreshTokenReuseDetected: jest.fn(),
+        publishPasswordResetRequested: jest.fn(),
+        publishEmailVerificationRequested: jest.fn(),
+      };
+      const options: AuthModuleOptions = {
+        jwt: { secret: 'secret' },
+        refreshTokenPurgeGraceSeconds: 60,
+      };
+      const service = new RefreshTokenService(
+        repository as never,
+        options,
+        events,
+      );
+      const before = Date.now();
+
+      await service.purgeExpiredTokens();
+
+      const [cutoff] = repository.deleteExpiredAndRevoked.mock.calls[0]!;
+      const expectedCutoff = before - 60 * 1000;
+      expect(cutoff.getTime()).toBeGreaterThanOrEqual(expectedCutoff - 1000);
+      expect(cutoff.getTime()).toBeLessThanOrEqual(expectedCutoff + 1000);
     });
   });
 });

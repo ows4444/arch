@@ -26,6 +26,14 @@ export interface AuthModuleOptions {
    */
   maxActiveSessionsPerUser?: number;
 
+  /**
+   * How long a revoked or naturally-expired refresh token row is kept
+   * before the scheduled purge job deletes it. Defaults to
+   * `DEFAULT_REFRESH_TOKEN_PURGE_GRACE_SECONDS` (24h). See
+   * `RefreshTokenRepository.deleteExpiredAndRevoked`.
+   */
+  refreshTokenPurgeGraceSeconds?: number;
+
   passwordResetTokenTtlSeconds?: number;
 
   emailVerificationTokenTtlSeconds?: number;

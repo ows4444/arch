@@ -75,4 +75,26 @@ export class RefreshTokenRepository extends BaseRepository<RefreshTokenEntity> {
 
     await this.update({ id: In(ids) }, { revokedAt: new Date() });
   }
+
+  /**
+   * Deletes rows that are both dead (revoked, or naturally expired) *and*
+   * past `before` — the grace window `RefreshTokenService.purgeExpiredTokens`
+   * applies so a token that was just revoked (e.g. by `rotate()`'s reuse
+   * detection) isn't deleted before `findByTokenHash` has a chance to
+   * observe it as "already revoked" and report reuse; deleting it instantly
+   * would silently swap the "reuse detected, family revoked" error for a
+   * generic "invalid token" one on the next replay attempt.
+   */
+  async deleteExpiredAndRevoked(before: Date): Promise<number> {
+    return this.runWrite(async () => {
+      const result = await this.repository
+        .createQueryBuilder()
+        .delete()
+        .where('(revokedAt IS NOT NULL AND revokedAt < :before)', { before })
+        .orWhere('expiresAt < :before', { before })
+        .execute();
+
+      return result.affected ?? 0;
+    });
+  }
 }

@@ -2136,3 +2136,129 @@ PASS (`npm run lint`)
 
 - No Critical/High findings remain open. `libs/auth` remains at a natural stopping point per
   Section 16 until a new concrete finding or requirement surfaces.
+
+---
+
+# Loop 024
+
+**Library:** libs/auth
+**Date:** 2026-07-24
+
+## Goal
+
+Give `libs/scheduler` (built and live-verified in its own Loops 001–002, but with zero real
+consumers anywhere in the app — see `REQUIREMENTS.md` Decision Log) its first real consumer.
+`auth_refresh_tokens` was identified as the strongest candidate: every existing mutation
+(`rotate`, `revoke`, `revokeAllForUser`, `enforceSessionLimit`) only ever sets `revokedAt`, never
+deletes, so the table grows without bound — no cleanup path existed anywhere.
+
+## Files Reviewed
+
+- `domain/refresh-token.entity.ts`, `domain/refresh-token.repository.ts`,
+  `application/refresh-token.service.ts` — confirmed no delete/purge method existed.
+- `libs/scheduler/src/decorators/scheduled-job.decorator.ts`,
+  `discovery/scheduled-job.registry.ts`, `engine/scheduled-job-sweep.service.ts` — confirmed the
+  `@ScheduledJob` handler contract (no-arg method, `Promise<void>`) and that discovery scans every
+  provider in the app, not just ones inside a module that imports `SchedulerModule` — so
+  `libs/auth` can depend on `@/scheduler` for just the decorator (metadata-only, no DI wiring)
+  without `AuthModule` importing `SchedulerModule` itself, consistent with `libs/auth` already
+  freely depending on `@/audit`, `@/cache`, `@/database`, `@/ratelimit` for cross-cutting concerns.
+
+## Problems Found
+
+**Medium**
+- No cleanup path for dead `auth_refresh_tokens` rows (the actual gap this loop closes).
+
+**Critical (found during live verification, not code review)**
+- `MYSQL_TIME_ZONE=UTC` in `.env`/`.env.example` is not a value mysql2 recognizes (`'local'`, `'Z'`,
+  or an explicit `±HH:MM` offset are the only valid values) — mysql2 logs "Ignoring invalid
+  timezone passed to Connection: UTC" and silently falls back to `'local'`. Separately, and more
+  significantly: `libs/scheduler`'s `computeNextFireAt` (`cron-time.util.ts`) calls
+  `new CronTime(cronExpression, timezone)` with `timezone` left `undefined` whenever a
+  `@ScheduledJob` doesn't pass one — which defaults to the **Node process's local system
+  timezone**, not UTC. In any environment where the process's local TZ isn't UTC, every scheduled
+  job's cron evaluation silently drifts by the local UTC offset. This was invisible in
+  `libs/scheduler`'s own Loop 001/002 live verification because nothing there checked the *absolute*
+  fire time against true UTC wall-clock, only that fires happened at all. Caught here only because
+  manually backdating test rows via raw SQL to force an immediate fire surfaced a 5-hour mismatch
+  between `nextFireAt` as computed and as displayed by direct DB inspection.
+
+## Changes Made
+
+- `RefreshTokenRepository.deleteExpiredAndRevoked(before: Date): Promise<number>` — deletes rows
+  where `revokedAt IS NOT NULL AND revokedAt < before`, or `expiresAt < before`.
+- `RefreshTokenService.purgeExpiredTokens()` — the `@ScheduledJob('auth.refresh-token-purge',
+  '0 * * * *', { timezone: 'UTC' })` handler; computes `before = now - purgeGraceSeconds` and calls
+  the repository method. Logs the deleted count when non-zero.
+- `AuthModuleOptions.refreshTokenPurgeGraceSeconds` (default
+  `DEFAULT_REFRESH_TOKEN_PURGE_GRACE_SECONDS`, 24h) — the grace window between a token becoming dead
+  (revoked or expired) and its row being deleted. Exists specifically so `rotate()`'s reuse-detection
+  path (`findByTokenHash` on an already-revoked row → "reuse detected, family revoked") keeps
+  working for a while after revocation, instead of a replay attempt silently degrading to a generic
+  "invalid token" error the instant the row disappears.
+- `.env`/`.env.example`: `MYSQL_TIME_ZONE` changed from `UTC` to `Z` (the mysql2-recognized keyword)
+  — a real, independent fix (prevents mysql2's documented future breaking change: "in future
+  versions... an error will be thrown"), but confirmed *not* the source of the 5-hour drift above.
+- `.env`/`.env.example`: added `TZ=UTC` — this is what actually fixes the drift, since it pins the
+  Node process's own local timezone (this sandbox resolved to `Asia/Karachi`, confirmed via
+  `Intl.DateTimeFormat().resolvedOptions().timeZone`) to UTC, which fixes every timezone-naive
+  `Date`/cron computation app-wide, not just this one job.
+- Kept the explicit `{ timezone: 'UTC' }` option on `auth.refresh-token-purge`'s `@ScheduledJob` call
+  even after the `TZ=UTC` process-level fix — defense in depth: a cleanup job's own schedule
+  shouldn't depend on the deploying process's local timezone at all.
+
+## Why
+
+Per `ci.loop` §17 (never trade correctness for elegance) and the explicit precedent set by every
+prior loop that found a live-verification-only bug (`libs/scheduler` Loop 001's boot-crash,
+Loop 002's orphaned-row hot-loop): this is exactly the class of bug unit/sqlite tests structurally
+cannot catch, since `better-sqlite3` has no server-side timezone concept and no test asserted
+against true wall-clock time. Fixed at the process level (`TZ=UTC`) rather than only at the
+`libs/scheduler` code level, because the same undefined-timezone default affects every future
+`@ScheduledJob` consumer, not just this one — a per-job `{ timezone: 'UTC' }` default would have to
+be remembered every time, whereas fixing the process's own timezone fixes the whole class at once.
+Not generalizing further (e.g. making `libs/scheduler` reject an omitted `timezone` option, or
+defaulting it to `'UTC'` in the decorator itself) in this same pass — that's a `libs/scheduler`
+design change with its own tradeoffs (silently overriding a job author's intent vs. failing loud),
+better decided in that library's own next loop rather than folded into this one's scope.
+
+## Tests
+
+- New unit tests: `refresh-token.service.spec.ts`'s `purgeExpiredTokens` describe block (default
+  grace window, configured grace window).
+- New integration test in `auth.integration.spec.ts` (real in-memory sqlite, real repositories):
+  inserts a well-past-grace revoked row, a within-grace revoked row, and a well-past-grace expired
+  row directly, runs `purgeExpiredTokens()`, and confirms exactly the two past-grace rows are
+  deleted while the within-grace row and a live session both survive.
+- Full monorepo suite: 1305/1313 passing (8 pre-existing skips, up from 1302/1310), `typecheck` and
+  `lint` both clean.
+- **Live-verified end to end** against real MySQL/RabbitMQ (`make compose-up`): confirmed
+  `auth.refresh-token-purge` registers in `scheduled_jobs` with the correct cron/misfire-policy
+  defaults; confirmed the misfire-skip path actually skips-and-advances when fired late (the same
+  behavior `libs/scheduler` Loop 002 verified, re-confirmed here as a side effect of debugging the
+  timezone issue); and, after the `TZ=UTC` fix, confirmed a real sweep correctly purged exactly the
+  two intended test rows (logged `"Purged 57 expired/revoked refresh token(s)."` — the other 55
+  were genuinely stale rows already accumulated in this persistent dev database from earlier
+  sessions, not test artifacts).
+
+## Build
+
+PASS (`npm run typecheck`)
+
+## Lint
+
+PASS (`npm run lint`)
+
+## Remaining TODO
+
+- Unchanged: MFA/2FA, API keys, OAuth2/SSO — none have a concrete trigger yet.
+- Cross-check flagged, not yet resolved: whether `libs/scheduler` itself should default
+  `ScheduledJobOptions.timezone` to `'UTC'` (or refuse to compute a schedule without one) rather than
+  silently inheriting the host process's local timezone — see `libs/scheduler/LOOP.md` for that
+  library's own next loop.
+
+## Next Loop
+
+- No Critical/High findings remain open in `libs/auth` itself (the Critical finding above was a
+  process-level/`libs/scheduler` issue, fixed at the process level). `libs/auth` remains at a
+  natural stopping point per Section 16 until a new concrete finding or requirement surfaces.

@@ -1,11 +1,13 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { InjectRepository } from '@/database';
+import { ScheduledJob } from '@/scheduler';
 import { RefreshTokenRepository } from '../domain/refresh-token.repository';
 import {
   AUTH_EVENT_PUBLISHER,
   AUTH_MODULE_OPTIONS,
   DEFAULT_MAX_ACTIVE_SESSIONS_PER_USER,
+  DEFAULT_REFRESH_TOKEN_PURGE_GRACE_SECONDS,
   DEFAULT_REFRESH_TOKEN_TTL_SECONDS,
 } from '../auth.constants';
 import type { AuthEventPublisher } from '../ports/auth-event-publisher.interface';
@@ -55,9 +57,13 @@ export interface ActiveSession {
 
 @Injectable()
 export class RefreshTokenService {
+  private readonly logger = new Logger(RefreshTokenService.name);
+
   private readonly ttlSeconds: number;
 
   private readonly maxActiveSessions: number;
+
+  private readonly purgeGraceSeconds: number;
 
   constructor(
     @InjectRepository(RefreshTokenRepository)
@@ -70,6 +76,9 @@ export class RefreshTokenService {
       options.refreshTokenTtlSeconds ?? DEFAULT_REFRESH_TOKEN_TTL_SECONDS;
     this.maxActiveSessions =
       options.maxActiveSessionsPerUser ?? DEFAULT_MAX_ACTIVE_SESSIONS_PER_USER;
+    this.purgeGraceSeconds =
+      options.refreshTokenPurgeGraceSeconds ??
+      DEFAULT_REFRESH_TOKEN_PURGE_GRACE_SECONDS;
   }
 
   async issue(
@@ -213,6 +222,23 @@ export class RefreshTokenService {
 
     if (!revoked) {
       throw new SessionNotFoundError(sessionId);
+    }
+  }
+
+  /**
+   * Deletes revoked/expired `auth_refresh_tokens` rows once they're past the
+   * purge grace window (see `deleteExpiredAndRevoked`'s doc for why a grace
+   * window exists at all) — otherwise the table grows without bound, since
+   * every prior mutation (`rotate`, `revoke`, `revokeAllForUser`,
+   * `enforceSessionLimit`) only ever sets `revokedAt`, never deletes.
+   */
+  @ScheduledJob('auth.refresh-token-purge', '0 * * * *', { timezone: 'UTC' })
+  async purgeExpiredTokens(): Promise<void> {
+    const before = new Date(Date.now() - this.purgeGraceSeconds * 1000);
+    const deleted = await this.refreshTokens.deleteExpiredAndRevoked(before);
+
+    if (deleted > 0) {
+      this.logger.log(`Purged ${deleted} expired/revoked refresh token(s).`);
     }
   }
 

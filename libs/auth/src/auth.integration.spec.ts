@@ -42,6 +42,7 @@ describe('libs/auth integration (real DataSource)', () => {
   let refreshTokenRepo: RefreshTokenRepository;
   let authTokenRepo: AuthTokenRepository;
   let authService: AuthService;
+  let refreshTokenService: RefreshTokenService;
   let authorizationService: AuthorizationService;
   let emailVerificationService: EmailVerificationService;
   let passwordResetService: PasswordResetService;
@@ -103,7 +104,7 @@ describe('libs/auth integration (real DataSource)', () => {
         return Promise.resolve();
       },
     };
-    const refreshTokenService = new RefreshTokenService(
+    refreshTokenService = new RefreshTokenService(
       refreshTokenRepo,
       options,
       events,
@@ -431,6 +432,64 @@ describe('libs/auth integration (real DataSource)', () => {
     await expect(
       authService.revokeSession(oscar!.id, laptopSession.id),
     ).rejects.toThrow('does not exist');
+  });
+
+  it('purges revoked/expired refresh tokens past their grace window, leaving live and within-grace rows untouched', async () => {
+    await authService.register({
+      email: 'quinn@example.com',
+      password: 'correct-horse-battery-staple',
+    });
+    await activate('quinn@example.com');
+    const quinn = await userRepo.findByEmail('quinn@example.com');
+
+    const live = await authService.login({
+      email: 'quinn@example.com',
+      password: 'correct-horse-battery-staple',
+    });
+
+    const now = new Date();
+    const wellPastGrace = new Date(now.getTime() - 25 * 60 * 60 * 1000);
+    const withinGrace = new Date(now.getTime() - 1 * 60 * 60 * 1000);
+
+    await refreshTokenRepo.save({
+      userId: quinn!.id,
+      tokenHash: 'purge-test-revoked-old',
+      familyId: 'family-a',
+      expiresAt: new Date(now.getTime() + 60_000),
+      revokedAt: wellPastGrace,
+      createdAt: wellPastGrace,
+    });
+    await refreshTokenRepo.save({
+      userId: quinn!.id,
+      tokenHash: 'purge-test-revoked-recent',
+      familyId: 'family-b',
+      expiresAt: new Date(now.getTime() + 60_000),
+      revokedAt: withinGrace,
+      createdAt: withinGrace,
+    });
+    await refreshTokenRepo.save({
+      userId: quinn!.id,
+      tokenHash: 'purge-test-expired-old',
+      familyId: 'family-c',
+      expiresAt: wellPastGrace,
+      revokedAt: null,
+      createdAt: wellPastGrace,
+    });
+
+    await refreshTokenService.purgeExpiredTokens();
+
+    expect(
+      await refreshTokenRepo.findByTokenHash('purge-test-revoked-old'),
+    ).toBeNull();
+    expect(
+      await refreshTokenRepo.findByTokenHash('purge-test-expired-old'),
+    ).toBeNull();
+    expect(
+      await refreshTokenRepo.findByTokenHash('purge-test-revoked-recent'),
+    ).not.toBeNull();
+
+    // The live session survives — the purge never touches active rows.
+    await expect(authService.refresh(live.refreshToken)).resolves.toBeDefined();
   });
 
   it('blocks login until the verification token is confirmed, then allows it', async () => {
