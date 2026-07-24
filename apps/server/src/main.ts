@@ -3,6 +3,7 @@ import { ValidationPipe } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import helmet from 'helmet';
 import { AppModule } from './app.module';
+import { RequestContextLogger } from './request-context/request-context-logger';
 
 function corsOrigins(): string[] | boolean {
   const raw = process.env.CORS_ORIGIN;
@@ -19,7 +20,9 @@ function corsOrigins(): string[] | boolean {
 }
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create(AppModule, {
+    logger: new RequestContextLogger(),
+  });
 
   app.use(helmet());
   app.enableCors({ origin: corsOrigins() });

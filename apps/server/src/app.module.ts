@@ -1,8 +1,9 @@
-import { Module } from '@nestjs/common';
+import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { plainToInstance } from 'class-transformer';
 import { validateSync } from 'class-validator';
 import Redis from 'ioredis';
+import { AuditModule, AUDIT_TYPEORM_ENTITIES, AUDIT_MIGRATIONS } from '@/audit';
 import {
   AuthModule,
   AuthModuleOptions,
@@ -17,8 +18,20 @@ import {
   CacheManager,
   CACHE_MANAGER,
 } from '@/cache';
-import { DatabaseBootstrapOptions, DatabaseModule } from '@/database';
-import { QueueModule, QUEUE_TYPEORM_ENTITIES, QUEUE_MIGRATIONS } from '@/queue';
+import { DatabaseModule } from '@/database';
+import { NotificationModule, LoggingEmailSender } from '@/notification';
+import {
+  OutboxService,
+  QueueModule,
+  QUEUE_TYPEORM_ENTITIES,
+  QUEUE_MIGRATIONS,
+} from '@/queue';
+import {
+  RateLimitModule,
+  RATELIMIT_TYPEORM_ENTITIES,
+  RATELIMIT_MIGRATIONS,
+} from '@/ratelimit';
+import { UsersModule, USERS_TYPEORM_ENTITIES, USERS_MIGRATIONS } from '@/users';
 import {
   ValidationModule,
   VALIDATION_TYPEORM_ENTITIES,
@@ -36,6 +49,9 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { IoRedisClientAdapter } from './redis/ioredis-client.adapter';
 import { ValidationRuleController } from './validation-rules/validation-rule.controller';
+import { RequestIdMiddleware } from './request-context/request-id.middleware';
+import { HealthController } from './health/health.controller';
+import { QueueAuthEventPublisher } from './notifications/queue-auth-event-publisher';
 
 function buildRabbitMqUri(): string {
   const host = process.env.RABBITMQ_HOST ?? 'localhost';
@@ -44,6 +60,44 @@ function buildRabbitMqUri(): string {
   const password = process.env.RABBITMQ_PASSWORD ?? 'guest';
 
   return `amqp://${username}:${password}@${host}:${port}`;
+}
+
+/**
+ * `RateLimitModule.forRoot` (not `forRootAsync`) is required for
+ * `rules.enabled` — `DatabaseRateLimiterRuleResolver` needs
+ * `RateLimitRuleRepository` statically injectable, which `forRootAsync`
+ * can't support (see `libs/ratelimit/ARCH.md` Design 007). `forRoot` needs
+ * synchronous options, so this reads `process.env` directly rather than
+ * going through the injected `ConfigService` `CacheModule` uses — same
+ * "read `process.env` directly for a synchronously-needed value" approach
+ * `buildRabbitMqUri` above and `validateAuthEnvironment` below already
+ * use in this file, just for Redis instead of RabbitMQ/JWT.
+ */
+function buildRedisConnectionOptions(): {
+  host: string;
+  port: number;
+  password?: string;
+  tls?: Record<string, never>;
+} {
+  const host = process.env.REDIS_HOST;
+  const port = process.env.REDIS_PORT;
+
+  if (!host) {
+    throw new Error('REDIS_HOST is required.');
+  }
+
+  if (!port) {
+    throw new Error('REDIS_PORT is required.');
+  }
+
+  return {
+    host,
+    port: Number(port),
+    ...(process.env.REDIS_PASSWORD !== undefined && {
+      password: process.env.REDIS_PASSWORD,
+    }),
+    ...(process.env.REDIS_TLS === 'true' && { tls: {} }),
+  };
 }
 
 /**
@@ -98,15 +152,26 @@ function validateAuthEnvironment(): AuthEnvironmentSchema {
         ...QUEUE_TYPEORM_ENTITIES,
         ...WORKFLOW_TYPEORM_ENTITIES,
         ...VALIDATION_TYPEORM_ENTITIES,
-      ] as unknown as DatabaseBootstrapOptions['entities'],
+        ...RATELIMIT_TYPEORM_ENTITIES,
+        ...USERS_TYPEORM_ENTITIES,
+        ...AUDIT_TYPEORM_ENTITIES,
+      ],
 
+      // USERS_MIGRATIONS must come after AUTH_MIGRATIONS: its seed
+      // migration grants `users:manage` to the `admin` role AUTH_MIGRATIONS
+      // creates (see libs/users' SeedUsersManagePermission migration).
       migrations: [
         ...AUTH_MIGRATIONS,
         ...QUEUE_MIGRATIONS,
         ...WORKFLOW_MIGRATIONS,
         ...VALIDATION_MIGRATIONS,
+        ...RATELIMIT_MIGRATIONS,
+        ...USERS_MIGRATIONS,
+        ...AUDIT_MIGRATIONS,
       ],
     }),
+
+    AuditModule.forRoot(),
 
     CacheModule.forRootAsync({
       useFactory: (...args: readonly unknown[]): CacheModuleOptions => {
@@ -151,11 +216,64 @@ function validateAuthEnvironment(): AuthEnvironmentSchema {
       inbox: true,
     }),
 
+    // LoggingEmailSender instead of the no-op default — the closest thing
+    // to a "real" adapter available without an actual SMTP/SendGrid/SES
+    // dependency (see libs/notification/ARCH.md, Rejected Alternatives).
+    NotificationModule.forRoot({ emailSender: new LoggingEmailSender() }),
+
+    // A separate Redis connection from CacheModule's — mirrors
+    // TopologyBootstrap's own separate raw AMQP connection in libs/queue
+    // (same "distinct concern, not worth threading through an existing
+    // module's internals" reasoning), rather than refactoring CacheModule's
+    // inline client construction just to share one.
+    RateLimitModule.forRoot({
+      limiters: {
+        // 5 attempts per minute per IP — brute-force protection for
+        // AuthController.login (see libs/auth/ARCH.md and
+        // libs/ratelimit/ARCH.md's Open Questions, now resolved).
+        login: { limit: 5, windowMs: 60_000 },
+        // 5 registrations per hour per IP — throttles mass/bot account
+        // creation without meaningfully affecting a real user (who
+        // registers once).
+        register: { limit: 5, windowMs: 60 * 60_000 },
+        // 5 requests per 15 minutes per IP, shared by both
+        // password-reset/request (throttles email-spam abuse) and
+        // password-reset/confirm (throttles token-guessing) — the two
+        // endpoints are one flow, so one limiter covers both.
+        'password-reset': { limit: 5, windowMs: 15 * 60_000 },
+        // Same shape as password-reset, shared by both
+        // email-verification/request (email-spam abuse) and
+        // email-verification/confirm (token-guessing) — one flow, one
+        // limiter.
+        'email-verification': { limit: 5, windowMs: 15 * 60_000 },
+        // The only limiter role-scoping actually applies to today: every
+        // limiter above protects a @Public() route, where RateLimitGuard
+        // never sees an authenticated request.user to read a role from
+        // (see libs/ratelimit/ARCH.md Design 008). 10/hour is generous for
+        // a real user (who changes their password rarely) while still
+        // throttling abuse of a stolen access token; admins get a higher
+        // ceiling for legitimate account-cleanup-type work.
+        'change-password': { limit: 10, windowMs: 60 * 60_000 },
+        'change-password:role:admin': { limit: 50, windowMs: 60 * 60_000 },
+      },
+      store: {
+        type: 'redis',
+        client: new IoRedisClientAdapter(
+          new Redis(buildRedisConnectionOptions()),
+        ),
+        keyPrefix: 'ratelimit',
+      },
+      // Admin-editable overrides for any of the limiters above, without a
+      // redeploy — see libs/ratelimit/ARCH.md Design 007/008.
+      rules: { enabled: true },
+    }),
+
     WorkflowModule.forRoot({ persistence: 'database' }),
 
     AuthModule.forRootAsync({
       useFactory: (...args: readonly unknown[]): AuthModuleOptions => {
         const cacheManager = args[0] as CacheManager;
+        const outbox = args[1] as OutboxService;
         const env = validateAuthEnvironment();
 
         return {
@@ -172,12 +290,22 @@ function validateAuthEnvironment(): AuthEnvironmentSchema {
           // instead of relying solely on the access token's own short
           // natural expiry (see libs/auth/ARCH.md, Key Decisions MEDIUM #3).
           accessTokenDenylist: new CacheAccessTokenDenylist(cacheManager),
+          // The first real (non-no-op) AuthEventPublisher this monorepo has
+          // wired — see apps/server/src/notifications/
+          // queue-auth-event-publisher.ts and libs/notification/ARCH.md.
+          eventPublisher: new QueueAuthEventPublisher(outbox),
         };
       },
-      inject: [CACHE_MANAGER],
+      inject: [CACHE_MANAGER, OutboxService],
     }),
+
+    UsersModule.forRoot(),
   ],
-  controllers: [AppController, ValidationRuleController],
+  controllers: [AppController, ValidationRuleController, HealthController],
   providers: [AppService],
 })
-export class AppModule {}
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer): void {
+    consumer.apply(RequestIdMiddleware).forRoutes('*');
+  }
+}

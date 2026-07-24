@@ -40,4 +40,13 @@ export class IoRedisClientAdapter implements RedisClient {
   unlink(...keys: string[]): Promise<number> {
     return this.client.unlink(...keys);
   }
+
+  eval(
+    script: string,
+    numKeys: number,
+    keys: string[],
+    args: string[],
+  ): Promise<unknown> {
+    return this.client.eval(script, numKeys, ...keys, ...args);
+  }
 }
