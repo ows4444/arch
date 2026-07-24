@@ -369,3 +369,234 @@ PASS (`npm run lint`)
 
 - Add the TTL-precision doc comment (or decide it's not worth one).
 - No other Critical/High/Medium findings open as of this loop.
+
+---
+
+# Loop 004
+
+**Library:** cache
+**Date:** 2026-07-22
+
+## Goal
+
+Close the one open Remaining TODO from Loop 003: document the Redis/Memory TTL precision
+mismatch (`Math.ceil(ttlMs / 1000)` in `RedisCacheStore.set()` vs. millisecond precision in
+`MemoryCache`) that Loop 002/003 investigated but left as undocumented tribal knowledge.
+
+## Files Reviewed
+
+- `libs/cache/src/caches/redis.cache.ts` (the `set()` method's TTL conversion)
+- `libs/auth`'s `CacheAccessTokenDenylist` (the one security-sensitive consumer riding on the
+  `default` redis cache, re-confirmed as still the relevant case)
+
+## Problems Found
+
+**Low**
+- (the same one Loop 002/003 already found and left undocumented — no new defect)
+
+## Changes Made
+
+- `redis.cache.ts`: added a comment at the `Math.ceil(ttlMs / 1000)` conversion explaining why
+  rounding up (not truncating) is the safe direction, and naming the one consumer where it
+  actually matters.
+
+## Why
+
+Loop 003 explicitly deferred this ("still worth an explicit doc comment next loop rather than
+leaving it tribal knowledge"). No behavior change — the rounding direction was already correct;
+this loop only documents the reasoning at the point of least distance from the code, per Section
+17 (prefer existing patterns, minimize diff).
+
+## Tests
+
+No test changes — comment only. `libs/cache` suite: 13 suites / 155 tests, unchanged, all passing.
+
+## Build
+
+PASS (`npm run typecheck`)
+
+## Lint
+
+PASS (`npm run lint`)
+
+## Remaining TODO
+
+- No `ARCH.md` exists for this library yet.
+
+## Next Loop
+
+- None forced. No Critical/High/Medium findings open.
+
+---
+
+# Loop 005
+
+**Library:** libs/cache
+**Date:** 2026-07-23
+
+## Goal
+
+Fresh adversarial Phase 1/2 pass over the whole library (all files under `libs/cache/src`)
+looking for one more genuinely real issue, per the pattern of Loops 3/4. Focus areas this
+time: `cache-manager.impl.ts`, `single-flight.ts`, `nest/cache.service.ts`,
+`nest/cache.interceptor.ts` + decorators, `caches/memory.cache.ts`/`storage/memory-cache.storage.ts`
+(re-verifying Loop 3's writeLock/eviction findings still hold), and `caches/redis.cache.ts`.
+
+## Files Reviewed
+
+- `cache-manager.impl.ts`, `core/single-flight.ts`, `nest/cache.service.ts` — no issues found;
+  `getOrLoad`'s double-checked-locking against `SingleFlight` is correct, and its
+  `JSON.stringify([cache, key])` dedup key is safe against collision (JSON-escapes
+  separators, unlike naive string concatenation).
+- `nest/cache.interceptor.ts` + `cacheable.decorator.ts`/`cache-put.decorator.ts`/
+  `cache-evict.decorator.ts` — re-verified Loop 2's hit/miss put-evict fix still holds on
+  both paths.
+- `caches/memory.cache.ts` + `storage/memory-cache.storage.ts` — re-verified Loop 3's
+  `writeLock` serialization and capacity-eviction-only-on-new-key logic; no regressions.
+- `caches/redis.cache.ts` and `caches/multi-level.cache.ts` — found a new issue (below).
+
+## Problems Found
+
+**Critical**
+
+- (none)
+
+**High**
+
+- (none)
+
+**Medium**
+
+- `RedisCacheStore.values()`/`entries()` implemented enumeration by calling the cache's own
+  public `get(key)` for every key returned by `scanNamespaceKeys()`. `get()` is the same method
+  application code calls for real reads, and it increments `stats.hits`/`misses`/`errors` and
+  fires `beforeGet`/`afterGet` cache plugin hooks. So every call to `values()`/`entries()` on a
+  Redis-backed cache — or transitively on a `MultiLevelCache` whose L2 is Redis, via
+  `multi-level.cache.ts`'s `entries()` calling `l2.entries()` — silently inflated the cache's own
+  hit-rate statistics and refired metrics/logging plugins as if each enumerated key were a real
+  application read. `MemoryCache.values()`/`entries()` read straight from `store.entries()` with
+  no stats/plugin side effects, so the two backends were inconsistent, and nothing caught the
+  Redis side polluting an observability surface (`CacheManager.statistics(name)`) that ops would
+  reasonably use for hit-rate/capacity-planning decisions.
+
+**Low**
+
+- (none newly found this loop)
+
+## Changes Made
+
+- `redis.cache.ts`: extracted a private `getRaw(key)` (fetch + deserialize only, no stats, no
+  plugin firing) out of `get()`. `get()` now calls `getRaw` and applies stats/plugin side
+  effects itself (preserving the existing miss-vs-error stat distinction). `values()`/`entries()`
+  now call `getRaw` instead of the public `get()`.
+- `redis.cache.spec.ts`: added a regression test proving `values()`/`entries()` leave
+  hits/misses/errors at 0 and never call `beforeGet`/`afterGet`, while a subsequent real
+  `get()` call still records stats/fires plugins as before.
+
+## Why
+
+- Direct instance of the "Observability" quality axis (Section 2) and the general
+  correctness-of-statistics expectation implicit in `StatisticsAwareCache` — a hit-rate stat
+  that's silently inflated by internal enumeration reads is worse than no stat at all, since it
+  looks authoritative. Fix is additive/internal (new private method, no public API/interface
+  change), backward compatible for every existing caller, so MEDIUM risk per ci.loop §18.
+- Preserved the existing miss-vs-error stat distinction on the real `get()` path rather than
+  collapsing both to "miss" when factoring out `getRaw` — an initial draft did collapse them
+  and was corrected before finalizing, since that would have silently changed `get()`'s existing,
+  already-tested behavior for corrupted values.
+
+## Tests
+
+`libs/cache` suite is now 13 spec files / 156 tests (up from 155). Full monorepo suite: 145
+suites / 1170 tests, all passing.
+
+## Build
+
+PASS (`npm run typecheck`)
+
+## Lint
+
+PASS (`npm run lint`)
+
+## Remaining TODO
+
+- No `ARCH.md` exists for this library yet.
+
+## Next Loop
+
+- None forced. No Critical/High/Medium findings open as of this loop.
+
+---
+
+# Loop 006
+
+**Library:** libs/cache
+**Date:** 2026-07-23
+
+## Goal
+
+Second adversarial pass in the same session as Loop 005, this time targeting the files not
+yet re-scrutinized this round: `cache.factory.ts`, `cache-registry.ts`, `nest/cache.module.ts`,
+`cache.module.validator.ts`, all four replacement policies (LRU/LFU/FIFO/MRU),
+`utils/serializer.ts`, `interfaces/cache-plugin.interface.ts`, `interfaces/cache.interfaces.ts`,
+`core/cache-entry.ts`.
+
+## Files Reviewed
+
+- `cache.factory.ts`, `cache-registry.ts` — DI wiring and registry CRUD traced end to end;
+  confirmed `CacheRegistry.unregister`/`values`/`clear` are unused internally but are exported
+  from the barrel (`index.ts`) as intentional public API for host apps, not dead code.
+- `nest/cache.module.ts` — re-verified `@Module({})` stays empty while `forRoot`/`forRootAsync`
+  carry the real `DynamicModule` shape (the NestJS dynamic-module/decorator-merge gotcha),
+  `@Global()` + `global: true` belt-and-suspenders still present, `useFactory`/`useExisting`/
+  `useClass` branching in `createAsyncOptionsProviders` still correct.
+- `policies/lru.policy.ts`, `lfu.policy.ts`, `fifo.policy.ts`, `mru.policy.ts` — traced
+  `onGet`/`onSet`/`onDelete`/`onClear`/`evict()` for all four; linked-list splice correctness
+  (LRU/MRU), frequency+insertion-order tie-breaking (LFU), and no-reorder-on-read semantics
+  (FIFO) all correct.
+- `utils/serializer.ts`, `interfaces/cache-plugin.interface.ts`, `interfaces/cache.interfaces.ts`,
+  `core/cache-entry.ts` — no issues; plugin error isolation (`runCachePlugins`) correctly
+  prevents one misbehaving plugin from blocking others or aborting the cache op.
+
+## Problems Found
+
+**Critical** — (none)
+**High** — (none)
+**Medium** — (none)
+**Low** — (none)
+
+## Changes Made
+
+- None. Everything inspected this loop already satisfies correctness/maintainability/
+  readability per ci.loop §18 ("never refactor code that already satisfies" these).
+
+## Why
+
+Combined with Loop 005 (same day), this closes out a full second Phase 1/2 sweep of every
+file in `libs/cache/src` with no new findings — the stop condition in ci.loop §16 is met
+(no Critical/High findings, build/lint/tests pass, architecture coherent).
+
+## Tests
+
+No changes. `libs/cache` suite: 13 suites / 156 tests, unchanged, all passing.
+
+## Build
+
+PASS (`npm run typecheck`)
+
+## Lint
+
+PASS (`npm run lint`)
+
+## Remaining TODO
+
+- No `ARCH.md` exists for this library yet (carried across all 6 loops — would need a
+  dedicated Design Mode session, not a mechanical addition, since none preceded this
+  library's original implementation).
+
+## Next Loop
+
+- None forced. `libs/cache` has reached the ci.loop §16 stop condition: no Critical/High/
+  Medium issues remain across two consecutive adversarial passes (Loops 5-6). Future loops
+  should wait for either a real code change (new feature/consumer) or a deliberate decision
+  to open a Design Mode session for the missing `ARCH.md`.

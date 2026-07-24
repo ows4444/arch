@@ -35,6 +35,21 @@ export interface RedisClient {
 
   /** Optional; see `scan`. */
   unlink?(...keys: string[]): Promise<number>;
+
+  /**
+   * Optional. Runs a Lua script atomically server-side — the primitive a
+   * plain `get`/`set` round-trip can't provide (e.g. an atomic
+   * check-and-increment). Not used by `RedisCacheStore` itself; exists so
+   * consumers that need real atomicity (e.g. `@/ratelimit`'s Redis-backed
+   * store) can get it through the same `RedisClient` port rather than each
+   * reaching for a raw client of their own.
+   */
+  eval?(
+    script: string,
+    numKeys: number,
+    keys: string[],
+    args: string[],
+  ): Promise<unknown>;
 }
 
 export class RedisCacheStore<V> implements StatisticsAwareCache<string, V> {
@@ -93,25 +108,44 @@ export class RedisCacheStore<V> implements StatisticsAwareCache<string, V> {
   async get(key: string): Promise<V | undefined> {
     await this.runPlugins((plugin) => plugin.beforeGet?.(key));
 
-    const value = await this.client.get(this.key(key));
+    const raw = await this.client.get(this.key(key));
 
-    if (value === null) {
+    if (raw === null) {
       this.stats.misses++;
       await this.runPlugins((plugin) => plugin.afterGet?.(key, undefined));
       return undefined;
     }
 
-    const deserialized = this.serializer.deserialize<V>(value);
+    const deserialized = this.serializer.deserialize<V>(raw);
+
     if (deserialized === undefined) {
       this.stats.errors++;
-
       await this.runPlugins((plugin) => plugin.afterGet?.(key, undefined));
-
       return undefined;
     }
+
     this.stats.hits++;
     await this.runPlugins((plugin) => plugin.afterGet?.(key, deserialized));
     return deserialized;
+  }
+
+  /**
+   * Fetch + deserialize a single key without touching hit/miss/error
+   * statistics or firing `beforeGet`/`afterGet` plugin hooks. Used by
+   * `values()`/`entries()`, which enumerate every key under this cache's
+   * namespace for administrative purposes — routing that through the public
+   * `get()` would make bulk enumeration inflate the cache's own hit-rate
+   * stats and refire metrics/logging plugins as if each key were a real
+   * application read.
+   */
+  private async getRaw(key: string): Promise<V | undefined> {
+    const value = await this.client.get(this.key(key));
+
+    if (value === null) {
+      return undefined;
+    }
+
+    return this.serializer.deserialize<V>(value);
   }
 
   async set(key: string, value: V, options?: CacheSetOptions): Promise<void> {
@@ -120,6 +154,12 @@ export class RedisCacheStore<V> implements StatisticsAwareCache<string, V> {
     await this.client.set(
       this.key(key),
       this.serializer.serialize(value),
+      // RedisClient.set takes whole seconds; rounding up (not truncating)
+      // means an entry can outlive its requested TTL by at most ~999ms,
+      // never expire early. Safe for the one security-sensitive consumer
+      // today (CacheAccessTokenDenylist in libs/auth, on the `default`
+      // redis cache) — a denylisted token can only stay denied slightly
+      // longer than requested, never fall out of the denylist early.
       ttlMs === undefined ? undefined : Math.ceil(ttlMs / 1000),
     );
     this.stats.writes++;
@@ -199,7 +239,7 @@ export class RedisCacheStore<V> implements StatisticsAwareCache<string, V> {
   async values(): Promise<readonly V[]> {
     const keys = await this.keys();
     const values: (V | undefined)[] = await Promise.all(
-      keys.map((k) => this.get(k)),
+      keys.map((k) => this.getRaw(k)),
     );
 
     return values.filter((v): v is V => v !== undefined);
@@ -208,7 +248,7 @@ export class RedisCacheStore<V> implements StatisticsAwareCache<string, V> {
   async entries(): Promise<readonly (readonly [string, V])[]> {
     const keys = await this.keys();
     const pairs: (readonly [string, V | undefined])[] = await Promise.all(
-      keys.map(async (k) => [k, await this.get(k)] as const),
+      keys.map(async (k) => [k, await this.getRaw(k)] as const),
     );
 
     return pairs.filter(

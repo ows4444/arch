@@ -166,6 +166,41 @@ describe('RedisCacheStore', () => {
       );
     });
 
+    it('values()/entries() do not inflate hit/miss statistics or fire get plugins', async () => {
+      const client = scanningClient({
+        'cache:a': JSON.stringify('1'),
+        'cache:b': JSON.stringify('2'),
+      });
+      const plugin = {
+        beforeGet: jest.fn(),
+        afterGet: jest.fn(),
+      };
+      const store = new RedisCacheStore<string>(
+        client,
+        undefined,
+        'cache',
+        undefined,
+        [plugin],
+      );
+
+      await store.values();
+      await store.entries();
+
+      const stats = await store.statistics();
+      expect(stats.hits).toBe(0);
+      expect(stats.misses).toBe(0);
+      expect(stats.errors).toBe(0);
+      expect(plugin.beforeGet).not.toHaveBeenCalled();
+      expect(plugin.afterGet).not.toHaveBeenCalled();
+
+      // A real get() still records stats/plugins as before.
+      await store.get('a');
+      const statsAfterRealGet = await store.statistics();
+      expect(statsAfterRealGet.hits).toBe(1);
+      expect(plugin.beforeGet).toHaveBeenCalledTimes(1);
+      expect(plugin.afterGet).toHaveBeenCalledTimes(1);
+    });
+
     it('size() reflects the number of keys under this namespace', async () => {
       const client = scanningClient({
         'cache:a': JSON.stringify('1'),
