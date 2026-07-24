@@ -72,6 +72,28 @@ describe('ValidationRuleAdminService', () => {
     ).rejects.toBeInstanceOf(ValidationRuleNotFoundError);
   });
 
+  it('does not let a cache-invalidation failure mask a successful create/update/remove', async () => {
+    (store.invalidate as jest.Mock).mockRejectedValue(
+      new Error('Redis connection refused'),
+    );
+
+    const created = await service.create({
+      targetType: 'Role',
+      field: 'name',
+      operator: ValidationRuleOperator.NOT_EQUALS,
+      value: 'root',
+    });
+    expect(created.targetType).toBe('Role');
+
+    const updated = await service.update(created.id, { enabled: false });
+    expect(updated.enabled).toBe(false);
+
+    await service.remove(created.id);
+    await expect(service.findOne(created.id)).rejects.toBeInstanceOf(
+      ValidationRuleNotFoundError,
+    );
+  });
+
   it('remove deletes an existing rule, invalidates the store, and throws for an unknown id', async () => {
     const created = await service.create({
       targetType: 'Role',

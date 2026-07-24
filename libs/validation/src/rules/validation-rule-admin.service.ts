@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@/database';
 import { ValidationRuleEntity } from '../persistence/entities/validation-rule.entity';
 import { ValidationRuleNotFoundError } from '../errors/validation-rule-not-found.error';
@@ -23,6 +23,8 @@ import {
  */
 @Injectable()
 export class ValidationRuleAdminService {
+  private readonly logger = new Logger(ValidationRuleAdminService.name);
+
   constructor(
     @InjectRepository(ValidationRuleRepository)
     private readonly repository: ValidationRuleRepository,
@@ -30,11 +32,33 @@ export class ValidationRuleAdminService {
     private readonly store: ValidationRuleStore,
   ) {}
 
+  /**
+   * `store.invalidate` is a best-effort cache-bust, not part of this
+   * operation's actual outcome — the DB write it follows has already
+   * committed by the time this runs. Letting a transient cache-backend
+   * failure here propagate would make a successful create/update/remove
+   * look like it failed to the caller, while the write (and, for `remove`,
+   * the rule's actual removal) already took effect. Logged and swallowed
+   * instead; the cache falls back to its normal TTL expiry in that case.
+   */
+  private async invalidateStore(targetType: string): Promise<void> {
+    try {
+      await this.store.invalidate(targetType);
+    } catch (error) {
+      this.logger.warn(
+        `Failed to invalidate validation rule cache for targetType='${targetType}' — ` +
+          `the write already succeeded; the cache will fall back to its normal TTL expiry. ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+      );
+    }
+  }
+
   async create(
     input: CreateValidationRuleInput,
   ): Promise<ValidationRuleEntity> {
     const created = await this.repository.createRule(input);
-    await this.store.invalidate(created.targetType);
+    await this.invalidateStore(created.targetType);
 
     return created;
   }
@@ -63,7 +87,7 @@ export class ValidationRuleAdminService {
       throw new ValidationRuleNotFoundError(id);
     }
 
-    await this.store.invalidate(updated.targetType);
+    await this.invalidateStore(updated.targetType);
 
     return updated;
   }
@@ -76,6 +100,6 @@ export class ValidationRuleAdminService {
     }
 
     await this.repository.deleteRule(id);
-    await this.store.invalidate(existing.targetType);
+    await this.invalidateStore(existing.targetType);
   }
 }

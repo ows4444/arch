@@ -1167,3 +1167,184 @@ PASS (`npm run typecheck`, zero errors)
 - None forced. This loop found and fixed one real Medium-severity fail-closed gap; no further
   issues surfaced on adversarial re-review. Per ci.loop §16, further work should wait for a
   concrete requirement or a genuinely new defect, not another speculative pass.
+
+---
+
+# Loop 014
+
+**Library:** validation
+**Date:** 2026-07-23
+
+## Goal
+
+Fresh adversarial Phase 1/2 pass, prompted by the same-day pattern of this `ci.loop` run finding
+real defects in sibling libraries by tracing what happens when a normally-reliable secondary
+operation (a cache write, a transaction commit) actually fails. Focused on
+`ValidationRuleAdminService`'s write path and `CachedValidationRuleStore`'s invalidation, which
+hadn't had this specific angle applied before.
+
+## Files Reviewed
+
+- `rules/validation-rule-admin.service.ts` (`create`/`update`/`remove`) — traced what happens if
+  `store.invalidate()` throws after each operation's DB write already committed.
+- `persistence/validation-rule.repository.ts` — confirmed `UpdateValidationRuleInput` deliberately
+  excludes `targetType` (only `field`/`operator`/`value`/`compareField`/`message`/`enabled` are
+  patchable), ruling out a hypothesized "update moves a rule to a different targetType, leaving the
+  old targetType's cache never invalidated" bug — `targetType` is immutable post-creation by
+  construction, so `updated.targetType` after any `update()` call is always the same key that was
+  cached to begin with.
+- `rules/cached-validation-rule.store.ts` — confirmed `invalidate()` is a thin
+  `cacheManager.delete(...)` call with no internal error handling of its own, so any transient
+  cache-backend failure (e.g. Redis blip) propagates straight up to whatever called `invalidate()`.
+- `ARCH.md` Design 004 (the design session that added `invalidate()` to the write path) — confirmed
+  this specific failure mode (cache-invalidation failure masking a successful DB write) was never
+  considered.
+
+## Problems Found
+
+**Critical / High** — none.
+
+**Medium**
+- `ValidationRuleAdminService.create()`/`update()`/`remove()` called `this.store.invalidate(...)`
+  after their respective DB write already succeeded, with no error handling. If the cache backend
+  is transiently unavailable and `invalidate()` throws, the exception propagates out of
+  `create`/`update`/`remove` — the caller sees the whole operation as failed even though the
+  database write already committed. Worst for `remove()`: an admin believes a rule deletion failed
+  (and may assume the rule is still enforced) when the row is actually gone — and the stale cache
+  (the thing that actually failed) keeps serving the deleted rule for up to its 30s TTL regardless
+  of the apparent error. A best-effort secondary side effect (cache invalidation) was allowed to
+  mask the outcome of the primary operation (the DB write) it followed.
+
+**Low** — none newly found this loop.
+
+## Changes Made
+
+- `rules/validation-rule-admin.service.ts`: added a `Logger`; extracted a private
+  `invalidateStore(targetType)` that wraps `store.invalidate(targetType)` in try/catch, logging a
+  `warn` on failure instead of propagating — `create`/`update`/`remove` all route through it now.
+- `rules/validation-rule-admin.service.spec.ts`: added a regression test where `store.invalidate`
+  is mocked to reject on every call, asserting `create`/`update`/`remove` all still succeed (the
+  created/updated entity is returned correctly, the removed rule is actually gone) despite the
+  cache-invalidation failure.
+
+## Why
+
+- Direct instance of the "Error Handling"/"Developer Experience" quality axes (Section 2) and the
+  same "a best-effort side effect shouldn't mask a successful primary operation" pattern already
+  established elsewhere in this monorepo (e.g. `WorkflowFailureService` catching-and-logging a
+  publish failure rather than letting it look like the state write failed). Fix is additive and
+  narrowly scoped (one new private method, no signature/interface change to
+  `ValidationRuleAdminService` or `ValidationRuleStore`), so MEDIUM risk per ci.loop §18 — backward
+  compatible for every caller, and strictly reduces surprising behavior (a successful write can no
+  longer present as a failure).
+- The hypothesized `targetType`-change staleness bug was investigated and ruled out rather than
+  assumed away — `UpdateValidationRuleInput`'s field list was checked directly against the
+  entity/DTO shape before concluding it doesn't apply.
+
+## Tests
+
+`libs/validation` suite is now 9 spec files / 55 tests (up from 54). Full monorepo suite: 145
+suites / 1175 tests, all passing.
+
+## Build
+
+PASS (`npm run typecheck`)
+
+## Lint
+
+PASS (`npm run lint`)
+
+## Remaining TODO
+
+- None new. Login brute-force protection and other libraries' own carried-over items are
+  unaffected by this loop.
+
+## Next Loop
+
+- No further Critical/High/Medium findings this pass beyond the one fixed. `libs/validation`
+  remains at a natural stopping point per Section 16.
+
+---
+
+# Loop 015
+
+**Library:** validation
+**Date:** 2026-07-23
+
+## Goal
+
+Second adversarial pass in the same session as Loop 014, matching the "two consecutive clean
+passes" bar this session reached for every other library. Targeted the remaining non-trivial
+files not individually reviewed in Loop 014: `core/composite-specifications.ts` (And/Or/Not
+combinators), `class-validator/class-validator.specification.ts`,
+`rules/stored-condition.specification.ts`, `nest/validation.service.ts`,
+`rules/database-validation-rule.store.ts`, `rules/validation-rule.service.ts`.
+
+## Files Reviewed
+
+- `core/composite-specifications.ts` — traced `AndSpecification`/`OrSpecification`/
+  `NotSpecification`'s `isSatisfiedBy`/`explain` pairs for double-evaluation and short-circuit
+  correctness. `OrSpecification.isSatisfiedBy` correctly short-circuits (native `||` skips the
+  right operand's `isSatisfiedBy` call once the left is `true`). `explain()` on each combinator
+  re-evaluates `isSatisfiedBy`/sub-`explain()` independently of the prior `isSatisfiedBy` call a
+  caller (`ValidationService.validate`) already made — a real but minor inefficiency (re-running
+  possibly-async/DB-backed specifications' checks twice on the failure path), not a correctness
+  bug, and `explain()` only runs after a validation has already failed, not on the hot path.
+- `class-validator/class-validator.specification.ts` — `validate()`'s `plainToInstance`/
+  `validateSync` pairing, `DEFAULT_OPTIONS`'s `whitelist`/`forbidNonWhitelisted`/
+  `forbidUnknownValues` fail-closed defaults; unchanged and correct.
+- `rules/stored-condition.specification.ts` — `composeStoredRules`'s AND-composition over stored
+  rules and the `AlwaysSatisfiedSpecification` empty-set case; unchanged and correct.
+- `nest/validation.service.ts`, `rules/validation-rule.service.ts` — `validate`/`validateOrThrow`'s
+  per-specification isSatisfiedBy-then-explain-on-failure loop, and `ValidationRuleService`'s
+  thin composition over `ValidationRuleStore`/`ValidationService`; unchanged and correct.
+- `rules/database-validation-rule.store.ts` — confirmed `invalidate()` is correctly a no-op
+  (this store has no cache of its own to bust; `CachedValidationRuleStore` is the one that wraps
+  it and actually needs invalidation).
+
+## Problems Found
+
+**Critical / High / Medium** — none.
+
+**Low**
+- The double-evaluation inefficiency in `composite-specifications.ts`'s `explain()` methods
+  (noted above) — not fixed: `explain()` only runs on the already-failed path, and every
+  `Specification` implementation in this library is either pure/cheap (class-validator) or a
+  single already-loaded-into-memory array scan (`StoredConditionSpecification` over rules
+  `ValidationRuleService` already fetched) — no realistic double-DB-round-trip scenario exists
+  today to justify restructuring the combinators to cache/reuse the first `isSatisfiedBy` result.
+
+## Changes Made
+
+None — nothing found that crossed the bar for a change.
+
+## Why
+
+Two consecutive clean adversarial passes (Loop 014 found and fixed one real Medium — the
+cache-invalidation-failure-masking-a-successful-write gap; this loop reviewed every remaining
+non-trivial file and found nothing beyond a Low-severity, not-worth-fixing inefficiency) meets the
+ci.loop §16 stopping condition for this library, matching the other six libraries' status this
+session.
+
+## Tests
+
+No test changes. Full monorepo suite: 145 suites / 1175 tests, all passing (unchanged — no code
+touched this loop).
+
+## Build
+
+Not re-run — no code changed this loop.
+
+## Lint
+
+Not re-run — no code changed this loop.
+
+## Remaining TODO
+
+- None new.
+
+## Next Loop
+
+- No Critical/High/Medium findings across two consecutive adversarial passes. `libs/validation`
+  remains at a natural stopping point per Section 16 until a new concrete finding or requirement
+  surfaces.
