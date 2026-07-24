@@ -17,7 +17,8 @@
       "Bash(npx nest *)",
       "Bash(git add *)",
       "Bash(npm rebuild *)",
-      "Bash(open -a Docker)"
+      "Bash(open -a Docker)",
+      "Bash(git fetch *)"
     ],
     "deny": [
       "Bash(rm -rf *)",

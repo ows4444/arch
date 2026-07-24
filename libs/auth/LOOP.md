@@ -2252,10 +2252,9 @@ PASS (`npm run lint`)
 ## Remaining TODO
 
 - Unchanged: MFA/2FA, API keys, OAuth2/SSO — none have a concrete trigger yet.
-- Cross-check flagged, not yet resolved: whether `libs/scheduler` itself should default
-  `ScheduledJobOptions.timezone` to `'UTC'` (or refuse to compute a schedule without one) rather than
-  silently inheriting the host process's local timezone — see `libs/scheduler/LOOP.md` for that
-  library's own next loop.
+- Resolved (2026-07-24, `libs/scheduler/LOOP.md` Loop 004): `libs/scheduler` now defaults an
+  omitted `timezone` to `'UTC'` at the decorator level, so `auth.refresh-token-purge` no longer
+  needs its own explicit `{ timezone: 'UTC' }` — removed as part of that loop.
 
 ## Next Loop
 

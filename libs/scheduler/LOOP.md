@@ -304,3 +304,76 @@ Unchanged (no source touched).
 
 - Decide the open timezone-default question above, the next time this library gets a scheduled
   review pass or a second `@ScheduledJob` consumer appears.
+
+---
+
+# Loop 004
+
+**Library:** libs/scheduler
+**Date:** 2026-07-24
+
+## Goal
+
+Resolve Loop 003's open design question: should an omitted `timezone` default to `'UTC'`, or fail
+loud? Decided with the user: default to UTC.
+
+## Files Reviewed
+
+- `decorators/scheduled-job.decorator.ts`, `scheduler.constants.ts` — the only two files touched.
+
+## Problems Found
+
+None new — this loop closes the Critical finding from Loop 003 at the library level (the process-
+level `TZ=UTC` fix from `libs/auth` Loop 024 remains in place as defense-in-depth, but is no longer
+the only thing preventing drift).
+
+## Changes Made
+
+- `scheduler.constants.ts`: added `DEFAULT_SCHEDULED_JOB_TIMEZONE = 'UTC'`.
+- `scheduled-job.decorator.ts`: `ScheduledJob(...)` now sets `timezone: options.timezone ??
+  DEFAULT_SCHEDULED_JOB_TIMEZONE` instead of only including `timezone` in the metadata when the
+  caller explicitly passed one. `ScheduledJobMetadata.timezone` changed from `string | undefined` to
+  `string` (always present) to make the guarantee visible in the type, not just the runtime value.
+- `libs/auth`'s `auth.refresh-token-purge` no longer passes `{ timezone: 'UTC' }` explicitly — it
+  was defense-in-depth against exactly this gap, now redundant with the library's own default.
+- New unit test (`scheduled-job.registry.spec.ts`): the existing `HourlyDigest` fixture (which
+  already omitted `timezone`, present since Loop 001 but never actually asserted on) now has a
+  dedicated test confirming `metadata.timezone === 'UTC'`.
+
+## Why
+
+Per the user's explicit choice between "default to UTC," "fail loud," and "leave as-is": defaulting
+closes the root cause at the one place it can never be forgotten again (every future
+`@ScheduledJob` call site, not just the ones an author remembers to annotate), and is non-breaking —
+every existing call site that already passed an explicit `timezone` (`nightly-cleanup` in this
+library's own test fixtures) is unaffected, since `options.timezone ?? DEFAULT` only changes
+behavior for the omitted case. "Fail loud" was the safer-in-principle alternative but was rejected
+as unnecessarily punitive for what should be a sane, low-surprise default — nothing about a plain
+recurring job's schedule benefits from an author being forced to type `'UTC'` every time.
+
+## Tests
+
+Full monorepo suite: 1306/1314 passing (8 pre-existing skips, up from 1305/1313 — the new default-
+timezone test), `typecheck` and `lint` both clean.
+
+**Live-verified** against real MySQL (`make compose-up`): booted `apps/server` with the new default
+(no `{ timezone: 'UTC' }` on `auth.refresh-token-purge` anymore) and confirmed
+`scheduled_jobs.timezone = 'UTC'` (previously `NULL`) and `nextFireAt` computed to the correct true-
+UTC next-top-of-hour, matching real wall clock.
+
+## Build
+
+PASS (`npm run typecheck`)
+
+## Lint
+
+PASS (`npx eslint "libs/scheduler/**/*.ts"`)
+
+## Remaining TODO
+
+- None new. Unchanged from Loop 001/002: a runtime admin API and failure alerting remain deferred.
+
+## Next Loop
+
+- No further work queued until a concrete job needs scheduling, or one of ARCH.md's Open Questions
+  gets a real trigger. The timezone-default question from Loop 003 is now closed.

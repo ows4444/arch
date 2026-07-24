@@ -72,6 +72,16 @@ describe('ScheduledJobRegistry', () => {
     expect(registry.getDefinition('hourly-digest')).toBeDefined();
   });
 
+  it("defaults timezone to 'UTC' when a @ScheduledJob call omits it — never the host process's local timezone", async () => {
+    const { registry } = setup([new HourlyDigest()]);
+
+    await registry.onApplicationBootstrap();
+
+    expect(registry.getDefinition('hourly-digest')?.metadata.timezone).toBe(
+      'UTC',
+    );
+  });
+
   it('ignores providers with no @ScheduledJob-decorated methods', async () => {
     const { registry } = setup([new PlainService()]);
 

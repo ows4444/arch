@@ -232,7 +232,7 @@ export class RefreshTokenService {
    * every prior mutation (`rotate`, `revoke`, `revokeAllForUser`,
    * `enforceSessionLimit`) only ever sets `revokedAt`, never deletes.
    */
-  @ScheduledJob('auth.refresh-token-purge', '0 * * * *', { timezone: 'UTC' })
+  @ScheduledJob('auth.refresh-token-purge', '0 * * * *')
   async purgeExpiredTokens(): Promise<void> {
     const before = new Date(Date.now() - this.purgeGraceSeconds * 1000);
     const deleted = await this.refreshTokens.deleteExpiredAndRevoked(before);
