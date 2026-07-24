@@ -66,7 +66,21 @@ export class DataSourceManager implements OnApplicationShutdown {
 
     if (result.healthy) {
       state.healthy = true;
-      state.status = DataSourceStatus.READY;
+
+      // Don't stomp a RECONNECTING status back to READY: a successful
+      // health-check query can complete right after this same check cycle's
+      // updateServerIdentity() call detected a server-identity change and
+      // kicked off a background reconnectState() (see updateServerIdentity's
+      // doc comment) that synchronously set status to RECONNECTING before
+      // its first await. Overwriting that here would make selectReader()
+      // treat this state as eligible again while its dataSource is still
+      // being torn down/recreated underneath it. performReconnect's own
+      // markConnected() call sets status back to READY once the reconnect
+      // actually finishes.
+      if (state.status !== DataSourceStatus.RECONNECTING) {
+        state.status = DataSourceStatus.READY;
+      }
+
       state.metrics.latencyMs = result.latencyMs;
       state.metrics.consecutiveHealthCheckFailures = 0;
 

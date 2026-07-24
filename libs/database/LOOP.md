@@ -509,3 +509,356 @@ PASS (`npm run lint`)
 - No Critical/High findings remain open. Next loop would be a fresh Phase
   1/2 pass on `libs/cache`, `libs/queue`, or `libs/workflow`, or a Design
   Mode session if scope is being deliberately extended.
+
+---
+
+# Loop 006
+
+**Library:** database
+
+**Date:** 2026-07-22
+
+## Goal
+
+Close the `entities` type-cast gap flagged as Low in `apps/server/LOOP.md` Loop 001 and
+`apps/worker/LOOP.md` Loop 002: both apps needed `as unknown as DatabaseBootstrapOptions['entities']`
+to pass their entity-class arrays to `DatabaseModule.forRoot(...)`.
+
+## Files Reviewed
+
+- `libs/database/src/interfaces/database-bootstrap-options.interface.ts` (the `entities` field)
+- `libs/database/src/interfaces/database-module-options.ts`,
+  `database-options.interface.ts` (confirmed both derive from `DatabaseBootstrapOptions` — one
+  fix point, not several)
+- `libs/database/src/config/database-options.factory.ts` (confirmed `entities` is only ever
+  spread verbatim into TypeORM's `DataSourceOptions`, never inspected/called — so a construct
+  signature is the correct shape, not a functional one)
+- `node_modules/typeorm/data-source/BaseDataSourceOptions.d.ts` (TypeORM's own
+  `entities?: MixedList<Function | string | EntitySchema>` — confirms the intent was "any entity
+  class," not "any callable")
+- `apps/server/src/app.module.ts`, `apps/worker/src/worker.module.ts` (the two call sites needing
+  the cast)
+
+## Problems Found
+
+**Low**
+- `entities` was typed as `MixedList<string | ((...args: any[]) => any) | EntitySchema<any>>` — a
+  **call** signature. TypeORM entity classes only have a **construct** signature
+  (`new (...args) => T`), so real entity classes never structurally satisfied this type, forcing
+  both app modules to reach for `as unknown as ...`, which defeats any check that the right
+  classes were actually passed.
+
+## Changes Made
+
+- `libs/database/src/interfaces/database-bootstrap-options.interface.ts`: `entities` now typed
+  `MixedList<string | (new (...args: any[]) => unknown) | EntitySchema<any>>` — a construct
+  signature, mirroring the pattern the `migrations` field on the same interface already used
+  correctly one line below. (`Function` was tried first to mirror TypeORM's own upstream type
+  verbatim, but this repo's `@typescript-eslint/no-unsafe-function-type` rule rejects it — the
+  construct-signature form achieves the same structural fit without tripping that rule.)
+- `apps/server/src/app.module.ts`, `apps/worker/src/worker.module.ts`: removed the
+  `as unknown as DatabaseBootstrapOptions['entities']` casts (and the now-unused
+  `DatabaseBootstrapOptions` import in both files) — the plain entity-class arrays now typecheck
+  directly.
+
+## Why
+
+Same class of gap as picking a construct-signature type for `migrations` already got right on the
+adjacent field — no new type vocabulary introduced, just consistency within the same interface.
+Removing the casts restores the actual value of the type: passing something that isn't an entity
+class (or forgetting one) will now be a real typecheck error at each app's call site instead of
+silently passing through `unknown`.
+
+## Tests
+
+No new tests — pure type-level fix, no runtime behavior changed. Full monorepo suite: 135 suites /
+1054 tests, all passing (unchanged count).
+
+## Build
+
+PASS (`npm run typecheck`; also explicitly verified `npx nest build server` and
+`npx nest build worker` both compile clean with the casts removed)
+
+## Lint
+
+PASS (`npm run lint`)
+
+## Remaining TODO
+
+- None outstanding for this library.
+
+## Next Loop
+
+- No Critical/High findings remain open. Next loop would be a fresh Phase 1/2 pass on
+  `libs/cache`, `libs/queue`, or `libs/workflow`, or a Design Mode session if scope is being
+  deliberately extended.
+
+---
+
+# Loop 007
+
+**Library:** libs/database
+**Date:** 2026-07-23
+
+## Goal
+
+Fresh adversarial Phase 1/2 pass, targeting files that hadn't had individual deep-dive attention
+in prior loop write-ups: `connection-monitor.ts`, `health/database-health.service.ts`,
+`datasource/datasource.factory.ts`, `transaction/transaction-provider-enhancer.ts`,
+`repository/repository.providers.ts`, `repository/repository-discovery.service.ts`.
+
+## Files Reviewed
+
+- `datasource/connection-monitor.ts` — `healthCheck`'s writer+readers concurrent check with a
+  `running` re-entrancy guard, `check()`'s success/failure paths, `toBooleanFlag` (MySQL
+  `@@read_only` Buffer/numeric coercion) — traced the exact call order inside `check()`'s success
+  path and found a new issue (below).
+- `datasource/datasource.manager.ts` — `updateHealth`, `updateServerIdentity`,
+  `reconnectState`/`performReconnect`/`markConnected`/`markFailed`, `selectReader` (reader
+  eligibility gate), and the `reconnectPromise`-based dedup guard shared by
+  `ensureConnected`/`reconnectState` — re-verified the dedup guard is sound (no double-reconnect
+  race), which is what led to the actual finding in the health/identity update interaction instead.
+- `health/database-health.service.ts` — thin delegation wrapper over `DataSourceManager`; no
+  issues.
+- `datasource/datasource.factory.ts` — `create`/`destroy`/`recreate`; `recreate`'s
+  create-new-before-destroying-old ordering (and destroying the new one if destroying the old
+  fails) re-verified as correct and matching `DataSourceManager.performReconnect`'s expectations.
+- `transaction/transaction-provider-enhancer.ts` — the `onModuleInit`-time method-wrapping
+  mechanism (`instance[methodName] = (...) => executor.execute(...)`); traced own-property vs.
+  prototype shadowing, warn-without-instance path for REQUEST/TRANSIENT-scoped providers. No
+  issues found in this loop's scope.
+- `repository/repository.providers.ts`, `repository/repository-discovery.service.ts` — DI
+  provider factory and boot-time registration logging; no issues.
+
+## Problems Found
+
+**Critical** — (none)
+**High** — (none)
+
+**Medium**
+- `ConnectionMonitor.check()`'s success path calls `this.manager.updateServerIdentity(state,
+  identity)` immediately followed by `this.manager.updateHealth(state, { healthy: true, ... })`.
+  `updateServerIdentity`, when it detects a MySQL server-identity change (failover promoted a
+  different server behind the same host), synchronously sets `state.status =
+  DataSourceStatus.RECONNECTING` (inside `performReconnect`, which runs synchronously up to its
+  first `await` when kicked off via `reconnectState`) before kicking off the actual
+  reconnect in the background. The very next line in `check()` called `updateHealth(healthy:
+  true)`, whose success branch unconditionally set `state.status = DataSourceStatus.READY` —
+  immediately stomping the just-set `RECONNECTING` marker back to `READY`. Since
+  `DataSourceManager.selectReader()`'s eligibility check requires both `healthy` and `status ===
+  READY`, this meant a datasource mid-failover-reconnect (its `DataSource` object about to be
+  replaced by `factory.recreate`) could still be selected for new reads during the exact window
+  it was being torn down/recreated underneath — the one scenario `updateServerIdentity`'s own doc
+  comment says a reconnect is mandatory for. Not a contrived edge case: this is the intended path
+  through `ConnectionMonitor.check()` on every real MySQL failover event, and no existing test
+  (only mocked-manager tests in `connection-monitor.spec.ts`) exercised the interaction between
+  the two real `DataSourceManager` methods in sequence.
+
+**Low** — (none newly found this loop)
+
+## Changes Made
+
+- `datasource/datasource.manager.ts`: `updateHealth`'s healthy branch now only overwrites
+  `state.status` to `READY` when the current status isn't already `RECONNECTING` — leaving an
+  in-flight reconnect's status alone until `performReconnect`'s own `markConnected()` (or
+  `markFailed()`) call resolves it naturally. `state.healthy = true` is still set unconditionally
+  since the health-check query itself did genuinely succeed; only the `status` field (the one
+  `selectReader()` actually gates on) is protected.
+- `datasource/datasource.manager.spec.ts`: added a regression test reproducing
+  `ConnectionMonitor.check()`'s exact call order (`updateServerIdentity` with a changed
+  `serverUuid`, immediately followed by `updateHealth(healthy: true)`) against a `recreate` that
+  never resolves (to inspect mid-flight state), asserting `status` stays `RECONNECTING` rather
+  than being stomped back to `READY`.
+
+## Why
+
+- Direct instance of the exact hazard `updateServerIdentity`'s own doc comment (added Loop 001)
+  describes as the reason a reconnect is mandatory on server change — the reconnect was correctly
+  triggered, but a same-tick ordering issue in the caller undid the one status signal
+  `selectReader()` depends on to actually keep routing away from that datasource during the
+  window it matters. Fix is minimal and additive (a single guard condition), doesn't change the
+  public shape of `updateHealth`, and doesn't affect the common (no-server-change) path at all —
+  MEDIUM risk per ci.loop §18 (datasource/connectivity-adjacent behavior change, but narrowly
+  scoped to a state transition that was already broken, not a new capability).
+- Considered whether `state.healthy` should also be left alone during `RECONNECTING`, but the
+  health-check query did succeed against the (still-live, not-yet-destroyed) old connection at
+  the moment it ran — `healthy` reporting `true` is accurate; it's specifically `status` (the
+  routing-eligibility gate) that shouldn't have been overwritten.
+
+## Tests
+
+`libs/database` suite is now 17 spec files / 145 tests (up from 144). Full monorepo suite: 145
+suites / 1173 tests, all passing.
+
+## Build
+
+PASS (`npm run typecheck`)
+
+## Lint
+
+PASS (`npm run lint`)
+
+## Remaining TODO
+
+- None outstanding for this library.
+
+## Next Loop
+
+- No further Critical/High/Medium findings identified this pass beyond the one fixed. Next loop
+  would be a fresh Phase 1/2 pass on any of the four original shared libraries, or a Design Mode
+  session if scope is being deliberately extended.
+
+---
+
+# Loop 008
+
+**Library:** libs/database
+**Date:** 2026-07-23
+
+## Goal
+
+Second adversarial pass in the same session as Loop 007, matching the "two consecutive clean
+passes" bar already reached this session by `libs/cache`/`libs/queue`. Also specifically checked
+whether the failure-path analog of Loop 007's `RECONNECTING`-status-stomping bug exists anywhere
+(i.e. does `reportFailureForState`'s call chain have the same "sets a transitional status then
+immediately overwrites it" shape in reverse).
+
+## Files Reviewed
+
+- `repository/base.repository.ts` (full CRUD surface) — traced every write method
+  (`save`/`delete`/`update`/`insert`/etc.) confirming none pass `manager` through to
+  `runWrite`/`execute`'s `explicitManager` parameter, unlike the read methods. Confirmed this is
+  inert rather than a bug: `runWrite` always sets `retryOnFailure: false`, so `execute()`'s catch
+  block takes the generic "write operation, may or may not have committed" branch before it would
+  ever check `explicitManager` — the parameter is simply unreachable dead weight on the write path,
+  not a behavior difference.
+- `repository/repository-resolver.ts` — re-verified `resolve`/`manager`'s WRITE+transaction vs.
+  READ+pinned-state precedence and `scoped()`'s `managerOverride` mechanism; unchanged from Loop 003.
+- `datasource/datasource.manager.ts`'s `reportFailureForState`/`markFailed` — specifically checked
+  for a mirror-image version of Loop 007's bug (does the failure path also stomp a status a
+  concurrent operation just set). `updateHealth`'s failure branch only downgrades `status` to
+  `DEGRADED` when it was `READY` (conditional, not unconditional like the pre-fix healthy branch
+  was), so no analogous bug exists in the failure direction.
+- `pagination/pagination.util.ts` — re-confirmed page/limit clamping and `totalPages`/`hasNext`
+  math; unchanged from Loop 001.
+
+## Problems Found
+
+**Critical / High / Medium / Low** — none this pass.
+
+## Changes Made
+
+None — nothing found that crossed the bar for a change.
+
+## Why
+
+Two consecutive clean adversarial passes (Loop 007 found and fixed one real Medium; this loop
+found nothing new after specifically hunting for the failure-path mirror of that same bug class)
+meets the ci.loop §16 stopping condition for this library, matching `libs/cache`/`libs/queue`'s
+status this session.
+
+## Tests
+
+No test changes. Full monorepo suite: 145 suites / 1175 tests, all passing (unchanged from before
+this pass — no code touched).
+
+## Build
+
+Not re-run — no code changed this loop.
+
+## Lint
+
+Not re-run — no code changed this loop.
+
+## Remaining TODO
+
+- None outstanding for this library.
+
+## Next Loop
+
+- No Critical/High/Medium findings across two consecutive adversarial passes. `libs/database`
+  remains at a natural stopping point per Section 16 until a new concrete finding or requirement
+  surfaces.
+
+---
+
+# Loop 008
+
+**Library:** libs/database
+**Date:** 2026-07-23
+
+## Goal
+
+Following the same-day live-MySQL verification added for `libs/auth` (Loop 019) and
+`libs/workflow` (Loop 021), attempt the analogous verification here: `BaseRepository.execute()`'s
+write path is documented to fail fast with `ServiceUnavailableException` on a real connectivity
+error rather than retry (commit state is unknown), and that claim had only ever been exercised
+against mocked `isDatabaseConnectivityError` inputs, never a genuine driver-level error.
+
+## Files Reviewed
+
+- `repository/base.repository.ts`'s `execute()` (the write-fail-fast / read-retry branch under
+  test), `utils/database-error.util.ts`'s `isDatabaseConnectivityError` (the real MySQL/Postgres/
+  network error codes it matches), `datasource/datasource.factory.ts`'s `create()`/`destroy()`.
+
+## Problems Found
+
+None — this loop is a verification attempt, not a review pass, and it did not complete.
+
+## Changes Made
+
+None. Probed (via a throwaway spec, not committed) whether a real `mysql2`-backed `DataSource`
+could be made to throw one of `isDatabaseConnectivityError`'s real error codes
+(`PROTOCOL_CONNECTION_LOST`/`ECONNRESET`/etc.) without disrupting the shared `make compose-up`
+MySQL container other libraries' tests also depend on. Result: calling `dataSource.destroy()`
+then issuing a query does **not** reach the driver at all — TypeORM's own `DataSource` guards
+reject the query client-side with `code: undefined, "Connection is not established with mysql
+database"`, which `isDatabaseConnectivityError` correctly does *not* match (it isn't a real
+connectivity error, just TypeORM refusing to use a pool it was told to tear down). That means
+`ds.destroy()` is not a faithful stand-in for a genuine mid-operation connection loss — it
+proves nothing about the code path under test. Generating an actual `PROTOCOL_CONNECTION_LOST`/
+`ECONNRESET` would require either killing the real MySQL container's process/socket mid-query
+(disrupts the shared instance every other library's live tests — including this session's new
+auth/workflow MySQL specs — depend on) or a purpose-built network-partition harness (a toxiproxy-
+style TCP proxy sitting between the app and MySQL), which is real infrastructure work beyond a
+single verification loop, not something safely improvised against shared dev infra.
+
+## Why
+
+- Correctly abandoned rather than forced, for the same reason `libs/auth` Loop 018 abandoned its
+  own live-MySQL attempt: a technique that risks the shared container (or, here, one that silently
+  produces a non-representative result) doesn't clear the bar for "verification," and ci.loop's
+  own engineering principles (§17, correctness over completeness-for-its-own-sake) argue against
+  manufacturing a fake positive just to close a TODO.
+- Unlike auth/workflow's gaps — which only needed a *concurrency* condition real MySQL naturally
+  provides (a connection pool) — this gap needs a *fault-injection* condition (a connection that
+  is healthy, then genuinely drops) that neither the shared container nor a plain `DataSource`
+  API can produce safely. That's a materially different, larger piece of infrastructure
+  (toxiproxy or equivalent), not a same-shaped fix.
+
+## Tests
+
+No test changes (the probe spec was never committed). Full monorepo suite unchanged: 149 suites /
+1194 tests, all passing.
+
+## Build
+
+Not re-run — no code changed this loop.
+
+## Lint
+
+Not re-run — no code changed this loop.
+
+## Remaining TODO
+
+- The write-fail-fast path's live-infra verification remains open, but is now correctly
+  characterized: it needs a fault-injection proxy (e.g. toxiproxy) between the app and MySQL, not
+  just access to a scratch schema. Don't re-attempt via `dataSource.destroy()` or similar
+  in-process tricks — this loop confirmed that produces a non-representative client-side error,
+  not a real connectivity failure.
+
+## Next Loop
+
+- Revisit only if a fault-injection proxy is added to the local dev stack for some other reason
+  (at which point this becomes a small addition), or if a user explicitly wants that
+  infrastructure built solely for this verification.

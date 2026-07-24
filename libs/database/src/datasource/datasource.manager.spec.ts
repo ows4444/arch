@@ -1,6 +1,7 @@
 import { DataSourceManager } from './datasource.manager';
 import { DataSourceFactory } from './datasource.factory';
 import { DatabaseRole } from '../constants/database-role.enum';
+import { DataSourceStatus } from '../interfaces/datasource-state';
 import type { ResolvedDatabaseOptions } from '../interfaces/database-resolved-options.interface';
 
 function options(
@@ -165,6 +166,39 @@ describe('DataSourceManager reconnect', () => {
     await flushMicrotasks();
 
     expect(factory.recreate).not.toHaveBeenCalled();
+  });
+
+  it('does not let a health check that races a server-switch reconnect mark the state READY again', async () => {
+    // `recreate` never resolves, simulating an in-flight reconnect so we can
+    // inspect `status` mid-flight rather than after it completes.
+    const factory = fakeFactory({
+      recreate: jest.fn(() => new Promise(() => undefined)),
+    });
+    const manager = new DataSourceManager(options(0), factory);
+    await manager.initialize();
+
+    const writer = manager.writerState();
+
+    // Establish an initial server identity so the next call can detect a change.
+    manager.updateServerIdentity(writer, {
+      serverUuid: 'server-a',
+      hostname: 'host-a',
+      readOnly: false,
+    });
+
+    // Simulates ConnectionMonitor.check()'s exact call order: updateServerIdentity
+    // (detects the switch, synchronously kicks off a background reconnect that sets
+    // status to RECONNECTING) followed immediately by updateHealth(healthy: true)
+    // for the same successful health-check query that revealed the switch.
+    manager.updateServerIdentity(writer, {
+      serverUuid: 'server-b',
+      hostname: 'host-b',
+      readOnly: false,
+    });
+    manager.updateHealth(writer, { healthy: true, latencyMs: 5 });
+
+    expect(writer.status).toBe(DataSourceStatus.RECONNECTING);
+    expect(factory.recreate).toHaveBeenCalledTimes(1);
   });
 });
 
